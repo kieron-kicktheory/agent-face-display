@@ -148,9 +148,12 @@ class StatusTicker:
         self._blit()
     
     def _blit(self):
-        """Blit text to display (full width — icon is separate)"""
+        """Blit text to display, then re-blit icon on top if present"""
         self.display.set_window(0, self.y, self.dw - 1, self.y + self.row_h - 1)
         self.display.write_data(self.disp_buf)
+        # Re-draw icon on top (it occupies the left 24px)
+        if self._icon_data is not None:
+            self._blit_icon()
     
     def set_text(self, text):
         self.text = text.strip()

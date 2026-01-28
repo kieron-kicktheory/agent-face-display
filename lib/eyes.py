@@ -428,10 +428,10 @@ class Eyes:
         elif self.expression == EXPR_STRESSED:
             self._update_stressed(now)
         elif self.expression == EXPR_FOCUSED or self.expression == EXPR_TERMINAL:
-            # Focused/terminal: minimal movement, just subtle drift
-            if time.ticks_diff(now, self.last_move) > 6000:
-                x = randint(-2, 2) / 10
-                y = randint(0, 2) / 10
+            # Focused: slow deliberate scanning, like reading code
+            if time.ticks_diff(now, self.last_move) > 1500:
+                x = randint(-6, 6) / 10
+                y = randint(-2, 3) / 10
                 self.look_at(x, y)
                 self.last_move = now
         elif self.expression == EXPR_SLEEPY:
