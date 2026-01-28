@@ -158,3 +158,25 @@ YELLOW = 0xFFFF00
 CYAN = 0x00FFFF
 MAGENTA = 0xFF00FF
 PURPLE = 0x800080
+
+
+def fill_circle(display, cx, cy, r, color):
+    """Draw a filled circle using horizontal lines"""
+    for y in range(-r, r + 1):
+        # Calculate width at this y position
+        x_width = int((r * r - y * y) ** 0.5)
+        if x_width > 0:
+            display.fill_rect(cx - x_width, cy + y, x_width * 2, 1, color)
+
+
+def fill_rounded_rect(display, x, y, w, h, r, color):
+    """Draw a filled rounded rectangle"""
+    # Main body (without corners)
+    display.fill_rect(x + r, y, w - 2*r, h, color)
+    display.fill_rect(x, y + r, w, h - 2*r, color)
+    
+    # Four corners
+    fill_circle(display, x + r, y + r, r, color)          # Top-left
+    fill_circle(display, x + w - r - 1, y + r, r, color)  # Top-right
+    fill_circle(display, x + r, y + h - r - 1, r, color)  # Bottom-left
+    fill_circle(display, x + w - r - 1, y + h - r - 1, r, color)  # Bottom-right
