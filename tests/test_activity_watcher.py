@@ -250,9 +250,12 @@ class TestHandleEvent:
         watcher._handle_event({"event": "run_start"})
         watcher.ser.write.assert_called_with(b"S:Thinking...\n")
 
-    def test_run_end_no_status(self, watcher):
+    def test_run_end_sends_done(self, watcher):
+        watcher.current_expr = "thinking"
         watcher._handle_event({"event": "run_end"})
-        assert not watcher.ser.write.called
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        status_calls = [c for c in calls if c.startswith("S:")]
+        assert any(w in status_calls[0] for w in ["Done", "Finished", "All done", "Wrapped up"])
 
     def test_skips_process_tool(self, watcher):
         watcher._handle_event({"event": "tool_start", "tool": "process"})
@@ -338,6 +341,87 @@ class TestToolLabels:
         call = watcher.ser.write.call_args[0][0].decode()
         text = call[2:].rstrip(".\n").rstrip(".")
         assert text in aw.TOOL_LABELS["tts"]
+
+
+# ---------------------------------------------------------------------------
+# Expression mapping
+# ---------------------------------------------------------------------------
+
+class TestExpressionMapping:
+    def test_edit_sends_focused(self, watcher):
+        watcher._handle_event({"event": "tool_start", "tool": "edit"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:focused" in c for c in calls)
+
+    def test_read_sends_reading(self, watcher):
+        watcher._handle_event({"event": "tool_start", "tool": "read"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:reading" in c for c in calls)
+
+    def test_web_search_sends_searching(self, watcher):
+        watcher._handle_event({"event": "tool_start", "tool": "web_search"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:searching" in c for c in calls)
+
+    def test_exec_sends_terminal(self, watcher):
+        watcher._handle_event({"event": "tool_start", "tool": "exec"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:terminal" in c for c in calls)
+
+    def test_run_start_sends_thinking(self, watcher):
+        watcher._handle_event({"event": "run_start"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:thinking" in c for c in calls)
+
+    def test_run_end_sends_normal(self, watcher):
+        watcher.current_expr = "thinking"
+        watcher._handle_event({"event": "run_end"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:normal" in c for c in calls)
+
+    def test_unknown_tool_sends_normal(self, watcher):
+        # First set a different expression so normal isn't deduped
+        watcher.current_expr = "focused"
+        watcher._handle_event({"event": "tool_start", "tool": "some_new_tool"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:normal" in c for c in calls)
+
+    def test_sustained_work_sends_stressed(self, watcher):
+        watcher._work_start = time.time() - aw.SUSTAINED_WORK_THRESHOLD - 1
+        watcher._handle_event({"event": "tool_start", "tool": "edit"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:stressed" in c for c in calls)
+
+    def test_work_timer_starts_on_first_event(self, watcher):
+        assert watcher._work_start == 0
+        watcher._handle_event({"event": "tool_start", "tool": "read"})
+        assert watcher._work_start > 0
+
+    def test_work_timer_resets_on_idle(self, watcher):
+        watcher._work_start = time.time() - 100
+        watcher.last_activity = time.time() - aw.IDLE_TIMEOUT - 1
+        watcher._check_idle()
+        assert watcher._work_start == 0
+
+    def test_web_fetch_sends_reading(self, watcher):
+        watcher._handle_event({"event": "tool_start", "tool": "web_fetch"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:reading" in c for c in calls)
+
+    def test_memory_search_sends_reading(self, watcher):
+        watcher._handle_event({"event": "tool_start", "tool": "memory_search"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:reading" in c for c in calls)
+
+    def test_browser_sends_searching(self, watcher):
+        watcher._handle_event({"event": "tool_start", "tool": "browser"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:searching" in c for c in calls)
+
+    def test_write_sends_focused(self, watcher):
+        watcher._handle_event({"event": "tool_start", "tool": "write"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:focused" in c for c in calls)
 
 
 # ---------------------------------------------------------------------------

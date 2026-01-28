@@ -29,6 +29,12 @@ _CLOSED = 4
 EXPR_NORMAL = 0
 EXPR_SLEEPY = 1
 EXPR_ASLEEP = 2
+EXPR_FOCUSED = 3    # Coding/editing — squinted, pupils center
+EXPR_READING = 4    # Reading files/pages — pupils track left-right
+EXPR_SEARCHING = 5  # Web search — pupils dart around quickly
+EXPR_THINKING = 6   # LLM thinking — pupils look up
+EXPR_TERMINAL = 7   # Running commands — slight squint, fixed center
+EXPR_STRESSED = 8   # Long sustained work — wider eyes, faster blinks
 
 
 class Eyes:
@@ -92,6 +98,18 @@ class Eyes:
         self.last_move = time.ticks_ms()
         self.next_move = randint(2000, 4000)
         
+        # Reading animation state
+        self._read_dir = 1       # 1 = left-to-right, -1 = right-to-left
+        self._read_pos = -10     # Current x position (-10 to 10)
+        self._read_speed = 200   # ms per step
+        self._last_read = time.ticks_ms()
+        
+        # Searching animation state
+        self._search_target_x = 0
+        self._search_target_y = 0
+        self._last_search = time.ticks_ms()
+        self._search_speed = 300  # ms per dart
+        
         # Eyelid geometry
         ew = self.eye_width
         eh = self.eye_height
@@ -105,22 +123,63 @@ class Eyes:
         self._blit_both()
     
     def set_expression(self, expr):
-        """Set expression: 'normal', 'sleepy', 'asleep'"""
+        """Set expression based on activity"""
         if expr == 'asleep':
             self.expression = EXPR_ASLEEP
-            self._target_lid = 100  # Eyes fully closed
-            self._lid_speed = 1     # Gentle close from sleepy
+            self._target_lid = 100
+            self._lid_speed = 1
             self.look_at(0, 1.0)
         elif expr == 'sleepy':
             self.expression = EXPR_SLEEPY
-            self._target_lid = 45   # Eyelid covers 45% from top
-            self._lid_speed = 1     # Slow droop
-            # Look down noticeably when sleepy
+            self._target_lid = 45
+            self._lid_speed = 1
             self.look_at(0, 1.0)
+        elif expr == 'focused':
+            # Coding/editing — squinted, looking straight ahead
+            self.expression = EXPR_FOCUSED
+            self._target_lid = 25     # Slight squint from top
+            self._lid_speed = 2
+            self.look_at(0, 0.1)      # Slightly down, focused
+            self.next_blink = randint(5000, 10000)  # Blink less when focused
+        elif expr == 'reading':
+            # Reading — eyes track left to right
+            self.expression = EXPR_READING
+            self._target_lid = 10     # Slightly narrowed
+            self._lid_speed = 2
+            self._read_pos = -10      # Start from left
+            self._read_dir = 1
+            self._last_read = time.ticks_ms()
+        elif expr == 'searching':
+            # Searching — pupils dart around curiously
+            self.expression = EXPR_SEARCHING
+            self._target_lid = 0      # Wide open, curious
+            self._lid_speed = 3
+            self._last_search = time.ticks_ms()
+            self.next_blink = randint(2000, 4000)  # Normal blinking
+        elif expr == 'thinking':
+            # Thinking — look up and to the side
+            self.expression = EXPR_THINKING
+            self._target_lid = 0
+            self._lid_speed = 2
+            self.look_at(0.3, -0.8)   # Up and slightly right
+            self.next_blink = randint(4000, 8000)  # Thoughtful, less blinking
+        elif expr == 'terminal':
+            # Running commands — slight squint, fixed stare
+            self.expression = EXPR_TERMINAL
+            self._target_lid = 20     # Slight squint
+            self._lid_speed = 2
+            self.look_at(0, 0)        # Dead center
+            self.next_blink = randint(6000, 12000)  # Barely blinks
+        elif expr == 'stressed':
+            # Long work session — wider eyes, faster blinks
+            self.expression = EXPR_STRESSED
+            self._target_lid = 0      # Eyes wide
+            self._lid_speed = 3
+            self.next_blink = randint(1500, 3000)  # Blinks a lot
         else:
             self.expression = EXPR_NORMAL
             self._target_lid = 0
-            self._lid_speed = 3     # Quick wake up
+            self._lid_speed = 3
     
     def _build_corner_mask(self):
         r = self.corner_radius
@@ -353,20 +412,86 @@ class Eyes:
             self._start_blink()
             return
         
-        # Idle movement (less when sleepy)
-        if self.idle_mode:
+        # Expression-specific animations
+        if self.expression == EXPR_READING:
+            self._update_reading(now)
+        elif self.expression == EXPR_SEARCHING:
+            self._update_searching(now)
+        elif self.expression == EXPR_THINKING:
+            self._update_thinking(now)
+        elif self.expression == EXPR_STRESSED:
+            self._update_stressed(now)
+        elif self.expression == EXPR_FOCUSED or self.expression == EXPR_TERMINAL:
+            # Focused/terminal: minimal movement, just subtle drift
+            if time.ticks_diff(now, self.last_move) > 6000:
+                x = randint(-2, 2) / 10
+                y = randint(0, 2) / 10
+                self.look_at(x, y)
+                self.last_move = now
+        elif self.expression == EXPR_SLEEPY:
             if time.ticks_diff(now, self.last_move) > self.next_move:
-                if self.expression == EXPR_SLEEPY:
-                    # Sleepy: barely move, look down noticeably
-                    x = randint(-2, 2) / 10
-                    self.look_at(x, 1.0)
-                    self.next_move = randint(4000, 8000)
-                else:
-                    self.look_random()
-                    self.next_move = randint(2000, 4000)
+                x = randint(-2, 2) / 10
+                self.look_at(x, 1.0)
+                self.next_move = randint(4000, 8000)
+                self.last_move = now
+        elif self.idle_mode:
+            if time.ticks_diff(now, self.last_move) > self.next_move:
+                self.look_random()
+                self.next_move = randint(2000, 4000)
                 self.last_move = now
         
         self.update_pupils()
+    
+    def _update_reading(self, now):
+        """Reading animation — pupils sweep left to right like reading text"""
+        if time.ticks_diff(now, self._last_read) < self._read_speed:
+            return
+        self._last_read = now
+        
+        self._read_pos += self._read_dir * 2
+        
+        # At end of line, pause briefly then sweep back
+        if self._read_pos >= 10:
+            self._read_dir = -1
+            self._read_speed = 80    # Quick snap back (saccade)
+        elif self._read_pos <= -10:
+            self._read_dir = 1
+            self._read_speed = 200   # Slow read left-to-right
+            # Small downward shift each "line"
+        
+        self.look_at(self._read_pos / 10, 0.1)
+    
+    def _update_searching(self, now):
+        """Searching animation — pupils dart around curiously"""
+        if time.ticks_diff(now, self._last_search) < self._search_speed:
+            return
+        self._last_search = now
+        
+        # Quick dart to a new position
+        self._search_target_x = randint(-8, 8) / 10
+        self._search_target_y = randint(-4, 4) / 10
+        self.look_at(self._search_target_x, self._search_target_y)
+        
+        # Vary timing — sometimes quick darts, sometimes a pause
+        self._search_speed = randint(200, 600)
+    
+    def _update_thinking(self, now):
+        """Thinking animation — eyes drift up-right, occasional slow movement"""
+        if time.ticks_diff(now, self.last_move) > 3000:
+            # Gentle drift while thinking — mostly looking up
+            x = randint(1, 5) / 10
+            y = randint(-10, -5) / 10  # Always looking up
+            self.look_at(x, y)
+            self.last_move = now
+    
+    def _update_stressed(self, now):
+        """Stressed animation — slightly erratic movement, wider eyes"""
+        if time.ticks_diff(now, self.last_move) > 1500:
+            # Quick, slightly jittery movements
+            x = randint(-6, 6) / 10
+            y = randint(-3, 3) / 10
+            self.look_at(x, y)
+            self.last_move = now
 
 
 def run(display):

@@ -83,12 +83,23 @@ def _handle_line(line, ticker, eyes, display):
         # Expression change — also adjusts ticker color
         expr = line[2:].strip().lower()
         eyes.set_expression(expr)
-        if expr == "normal":
-            ticker.set_color(0xFFFFFF)   # Bright white when active
-        elif expr == "sleepy":
-            ticker.set_color(0x2288FF)   # Blue when idle (matches iris)
-        elif expr == "asleep":
+        # Ticker color matches mood
+        if expr in ("sleepy",):
+            ticker.set_color(0x2288FF)   # Blue when idle
+        elif expr in ("asleep",):
             ticker.set_color(0x114488)   # Dark blue when asleep
+        elif expr in ("stressed",):
+            ticker.set_color(0xFF4444)   # Red-ish when stressed
+        elif expr in ("focused", "terminal"):
+            ticker.set_color(0x44FF44)   # Green when coding/terminal
+        elif expr in ("thinking",):
+            ticker.set_color(0xFFAA00)   # Amber when thinking
+        elif expr in ("searching",):
+            ticker.set_color(0xFF88FF)   # Pink when searching
+        elif expr in ("reading",):
+            ticker.set_color(0x88DDFF)   # Light blue when reading
+        else:
+            ticker.set_color(0xFFFFFF)   # White default
 
 
 # Auto-restart loop — survive any crash

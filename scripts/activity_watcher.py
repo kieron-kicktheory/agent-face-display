@@ -37,7 +37,22 @@ SLEEPY_TIMEOUT = 300  # (same as idle — they fire together)
 ASLEEP_TIMEOUT = 600  # 10 minutes before fully asleep
 SCREEN_OFF_TIMEOUT = 900  # 15 minutes before screen off
 
-# Colors now driven by expression changes on ESP32 (E: command)
+# Colors driven by expression changes on ESP32 (E: command)
+# Tool → expression mapping
+TOOL_EXPRESSIONS = {
+    "edit": "focused",
+    "write": "focused",
+    "read": "reading",
+    "web_fetch": "reading",
+    "web_search": "searching",
+    "browser": "searching",
+    "exec": "terminal",
+    "memory_search": "reading",
+    "memory_get": "reading",
+    "sessions_history": "reading",
+    "image": "searching",
+}
+SUSTAINED_WORK_THRESHOLD = 600  # 10 minutes of continuous work → stressed
 
 # Fun idle phrases — one picked at random each time we go idle
 IDLE_PHRASES = [
@@ -116,6 +131,7 @@ class ActivityWatcher:
         self._last_phrase_time = 0
         self._tool_streak = ""   # Current tool being repeated
         self._streak_count = 0   # How many times in a row
+        self._work_start = 0     # When sustained work began
         self._connect_serial()
 
     def _read_hint(self) -> str | None:
@@ -301,6 +317,7 @@ class ActivityWatcher:
             # Go sleepy + idle together — eyes droop and text dims at once
             self.send_expression("sleepy")
             self.sleepy_sent = True
+            self._work_start = 0  # Reset sustained work timer
             self._idle_phrase = _choice(IDLE_PHRASES)
             self._idle_dots = 0
             self._last_dot_time = time.time()
@@ -332,6 +349,10 @@ class ActivityWatcher:
             self.asleep_sent = False
             self.send_expression("normal")
 
+        # Track sustained work duration
+        if self._work_start == 0:
+            self._work_start = time.time()
+
         if event == "tool_start":
             tool = info["tool"]
             # Skip noisy/internal tools
@@ -344,6 +365,14 @@ class ActivityWatcher:
             else:
                 self._tool_streak = tool
                 self._streak_count = 1
+            
+            # Set eye expression based on tool
+            work_duration = time.time() - self._work_start
+            if work_duration > SUSTAINED_WORK_THRESHOLD:
+                self.send_expression("stressed")
+            else:
+                expr = TOOL_EXPRESSIONS.get(tool, "normal")
+                self.send_expression(expr)
             
             # Check for a rich context hint from the agent first
             hint = self._read_hint()
@@ -364,11 +393,12 @@ class ActivityWatcher:
                 self.send_status(f"{label}...")
 
         elif event == "run_start":
+            self.send_expression("thinking")
             self.send_status("Thinking...")
 
         elif event == "run_end":
-            # Will go to idle after timeout
-            pass
+            self.send_expression("normal")
+            self.send_status(_choice(["Done", "Finished", "All done", "Wrapped up"]))
 
 
 def main():
