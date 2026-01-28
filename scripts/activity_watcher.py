@@ -51,6 +51,8 @@ TOOL_EXPRESSIONS = {
     "memory_get": "reading",
     "sessions_history": "reading",
     "image": "searching",
+    "message": "normal",
+    "tts": "normal",
 }
 SUSTAINED_WORK_THRESHOLD = 600  # 10 minutes of continuous work → stressed
 
@@ -397,7 +399,7 @@ class ActivityWatcher:
             self.send_status("Thinking...")
 
         elif event == "run_end":
-            self.send_expression("normal")
+            self.send_expression("done")
             self.send_status(_choice(["Done", "Finished", "All done", "Wrapped up"]))
 
 

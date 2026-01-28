@@ -1,10 +1,16 @@
 """
 Status ticker - SF Mono 16x24 native font
 Pre-rendered buffer for fast scrolling, no per-frame character loops
+Icon support: 24x24 bitmap rendered at left edge before text
 """
 import time
 import gc
 from lib.font16 import DATA, WIDTH, HEIGHT, FIRST, LAST, ROW_BYTES
+
+
+# Icon dimensions
+ICON_W = 24
+ICON_PAD = 4   # Gap between icon and text
 
 
 class StatusTicker:
@@ -20,7 +26,14 @@ class StatusTicker:
         # Default color
         self._set_color(color)
         
-        # Display buffer (what gets blitted)
+        # Icon state
+        self._icon_data = None    # Current icon bitmap (bytes) or None
+        self._icon_w = 0          # Width of icon area (icon + padding)
+        
+        # Icon buffer (rendered separately, left of text)
+        self._icon_buf = bytearray(ICON_W * self.row_h * 2)
+        
+        # Display buffer (what gets blitted — text portion only)
         self.disp_buf = bytearray(self.dw * self.row_h * 2)
         
         # Pre-allocate max text buffer (41 chars × 12px = 492px)
@@ -54,9 +67,80 @@ class StatusTicker:
     def set_color(self, color):
         """Change color and re-render current text"""
         self._set_color(color)
+        if self._icon_data:
+            self._render_icon()
+            self._blit_icon()
         if self.text:
             self._prerender()
             self._window()
+    
+    def set_icon(self, icon_data):
+        """Set icon bitmap (24x24, 3 bytes/row) or None to clear"""
+        if icon_data is None:
+            if self._icon_data is not None:
+                self._icon_data = None
+                self._icon_w = 0
+                # Clear icon area
+                self._clear_icon()
+            return
+        self._icon_data = icon_data
+        self._icon_w = ICON_W + ICON_PAD
+        self._render_icon()
+        self._blit_icon()
+    
+    def _render_icon(self):
+        """Render icon bitmap into icon buffer"""
+        buf = self._icon_buf
+        hi = self._hi
+        lo = self._lo
+        icon = self._icon_data
+        iw = ICON_W
+        rh = self.row_h
+        pad = 1  # Vertical pad (matches text)
+        
+        # Clear icon buffer
+        for i in range(len(buf)):
+            buf[i] = 0
+        
+        if icon is None:
+            return
+        
+        # Render 24x24 icon from bitmap
+        for row in range(24):
+            if row + pad >= rh:
+                break
+            dy = row + pad
+            b0 = icon[row * 3]
+            b1 = icon[row * 3 + 1]
+            b2 = icon[row * 3 + 2]
+            
+            for col in range(8):
+                if b0 & (1 << (7 - col)):
+                    idx = (dy * iw + col) * 2
+                    buf[idx] = hi
+                    buf[idx + 1] = lo
+            for col in range(8):
+                if b1 & (1 << (7 - col)):
+                    idx = (dy * iw + 8 + col) * 2
+                    buf[idx] = hi
+                    buf[idx + 1] = lo
+            for col in range(8):
+                if b2 & (1 << (7 - col)):
+                    idx = (dy * iw + 16 + col) * 2
+                    buf[idx] = hi
+                    buf[idx + 1] = lo
+    
+    def _blit_icon(self):
+        """Blit icon buffer to display at left edge"""
+        iw = ICON_W
+        self.display.set_window(0, self.y, iw - 1, self.y + self.row_h - 1)
+        self.display.write_data(self._icon_buf)
+    
+    def _clear_icon(self):
+        """Clear icon area on display"""
+        for i in range(len(self._icon_buf)):
+            self._icon_buf[i] = 0
+        self._blit_icon()
     
     def _clear(self):
         for i in range(len(self.disp_buf)):
@@ -64,6 +148,7 @@ class StatusTicker:
         self._blit()
     
     def _blit(self):
+        """Blit text to display (full width — icon is separate)"""
         self.display.set_window(0, self.y, self.dw - 1, self.y + self.row_h - 1)
         self.display.write_data(self.disp_buf)
     
@@ -76,7 +161,8 @@ class StatusTicker:
             return
         
         text_px = len(self.text) * self.ch_w
-        self.needs_scroll = self.force_scroll or text_px > self.dw
+        text_dw = self.dw - self._icon_w
+        self.needs_scroll = self.force_scroll or text_px > text_dw
         
         # Limit text width
         max_chars = 41
@@ -151,6 +237,8 @@ class StatusTicker:
         dw = self.dw
         fw = self._full_w
         rh = self.row_h
+        iw = self._icon_w  # Pixels reserved for icon (0 if no icon)
+        text_dw = dw - iw  # Available width for text
         
         # Clear display buffer
         for i in range(len(db)):
@@ -163,21 +251,20 @@ class StatusTicker:
         if self.needs_scroll:
             src_x = self.scroll_x
         else:
-            src_x = -(dw - fw) // 2
+            src_x = -(text_dw - fw) // 2
         
         # Calculate visible overlap
-        # src_x is where display pixel 0 maps to in the full buffer
-        copy_start = max(0, src_x)           # first src pixel to copy
-        copy_end = min(fw, src_x + dw)       # last src pixel (exclusive)
+        copy_start = max(0, src_x)
+        copy_end = min(fw, src_x + text_dw)
         
         if copy_start >= copy_end:
             self._blit()
             return
         
-        dst_offset = (copy_start - src_x) * 2   # where in display row to start
-        copy_bytes = (copy_end - copy_start) * 2 # bytes to copy per row
+        dst_offset = iw * 2 + (copy_start - src_x) * 2  # Offset past icon area
+        copy_bytes = (copy_end - copy_start) * 2
         
-        # Row-based slice copy (26 iterations, not 6240)
+        # Row-based slice copy
         for row in range(rh):
             si = row * fw * 2 + copy_start * 2
             di = row * dw * 2 + dst_offset
@@ -204,8 +291,9 @@ class StatusTicker:
         
         self.scroll_x += self.scroll_step
         
+        text_dw = self.dw - self._icon_w
         if self.scroll_x > self._full_w + 40:
-            self.scroll_x = -self.dw
+            self.scroll_x = -text_dw
         
         self._window()
         self.last_scroll = now

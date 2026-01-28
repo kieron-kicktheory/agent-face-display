@@ -373,11 +373,11 @@ class TestExpressionMapping:
         calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
         assert any("E:thinking" in c for c in calls)
 
-    def test_run_end_sends_normal(self, watcher):
+    def test_run_end_sends_done(self, watcher):
         watcher.current_expr = "thinking"
         watcher._handle_event({"event": "run_end"})
         calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
-        assert any("E:normal" in c for c in calls)
+        assert any("E:done" in c for c in calls)
 
     def test_unknown_tool_sends_normal(self, watcher):
         # First set a different expression so normal isn't deduped

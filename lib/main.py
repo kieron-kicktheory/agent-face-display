@@ -10,6 +10,7 @@ import sys
 from lib.st7789_lcd169 import ST7789
 from lib.eyes import Eyes
 from lib.ticker import StatusTicker
+from lib.icons import ICON_MAP
 
 
 def run():
@@ -83,6 +84,9 @@ def _handle_line(line, ticker, eyes, display):
         # Expression change — also adjusts ticker color
         expr = line[2:].strip().lower()
         eyes.set_expression(expr)
+        # Set icon for this expression
+        icon = ICON_MAP.get(expr)
+        ticker.set_icon(icon)
         # Ticker color matches mood
         if expr in ("sleepy",):
             ticker.set_color(0x2288FF)   # Blue when idle

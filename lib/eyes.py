@@ -176,6 +176,12 @@ class Eyes:
             self._target_lid = 0      # Eyes wide
             self._lid_speed = 3
             self.next_blink = randint(1500, 3000)  # Blinks a lot
+        elif expr == 'done':
+            # Task complete — normal eyes, slight look down (satisfied)
+            self.expression = EXPR_NORMAL
+            self._target_lid = 0
+            self._lid_speed = 3
+            self.look_at(0, 0.2)
         else:
             self.expression = EXPR_NORMAL
             self._target_lid = 0
