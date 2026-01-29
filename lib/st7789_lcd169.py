@@ -53,7 +53,7 @@ class ST7789:
         time.sleep_ms(150)
         
         # Backlight on
-        self.bl.value(1)
+        self.bl.duty_u16(65535)
         
         # Init sequence
         self.write_cmd(0x01)  # Software reset
