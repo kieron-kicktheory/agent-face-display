@@ -32,9 +32,10 @@ BAUD_RATE = 115200
 LOG_DIR = "/tmp/clawdbot"
 STATUS_HINT_FILE = "/tmp/clawdbot/status-hint.json"  # Agent writes context here
 HINT_MAX_AGE = 30  # seconds before a hint is considered stale
-IDLE_TIMEOUT = 300    # 5 minutes before idle phrases
-SLEEPY_TIMEOUT = 300  # (same as idle — they fire together)
-ASLEEP_TIMEOUT = 600  # 10 minutes before fully asleep
+WAITING_TIMEOUT = 10   # 10 seconds before "waiting" state
+IDLE_TIMEOUT = 180     # 3 minutes before idle phrases
+SLEEPY_TIMEOUT = 300   # 5 minutes before eyes droop
+ASLEEP_TIMEOUT = 600   # 10 minutes before fully asleep
 SCREEN_OFF_TIMEOUT = 900  # 15 minutes before screen off
 
 # Colors driven by expression changes on ESP32 (E: command)
@@ -55,6 +56,25 @@ TOOL_EXPRESSIONS = {
     "tts": "normal",
 }
 SUSTAINED_WORK_THRESHOLD = 600  # 10 minutes of continuous work → stressed
+
+# Waiting phrases — semi-idle, ready for work
+WAITING_PHRASES = [
+    "Nothing to do",
+    "Awaiting orders",
+    "Standing by",
+    "Ready when you are",
+    "At your service",
+    "Waiting for instructions",
+    "On standby",
+    "All ears",
+    "Ready to go",
+    "Just say the word",
+    "Twiddling my thumbs",
+    "Waiting patiently",
+    "Here if you need me",
+    "Standing at the ready",
+    "Idle hands over here",
+]
 
 # Fun idle phrases — one picked at random each time we go idle
 IDLE_PHRASES = [
@@ -122,6 +142,7 @@ class ActivityWatcher:
         self.ser = None
         self.current_status = ""
         self.last_activity = time.time()
+        self.waiting_sent = False
         self.idle_sent = False
         self.sleepy_sent = False
         self.asleep_sent = False
@@ -185,14 +206,14 @@ class ActivityWatcher:
             self._connect_serial()
 
     def send_screen(self, on: bool):
-        """Turn screen backlight on/off"""
-        cmd = "SCREEN:ON" if on else "SCREEN:OFF"
+        """Turn screen full brightness or dim"""
+        cmd = "SCREEN:ON" if on else "SCREEN:DIM:10"
         if self.ser and self.ser.is_open:
             try:
                 self.ser.write(f"{cmd}\n".encode())
                 self.ser.flush()
                 self.screen_off = not on
-                log(f"  💡 {'ON' if on else 'OFF'}")
+                log(f"  💡 {'ON' if on else 'DIM'}")
             except serial.SerialException:
                 self._connect_serial()
 
@@ -311,31 +332,47 @@ class ActivityWatcher:
                 f.close()
 
     def _check_idle(self):
-        """Check idle timers and transition through sleepy → asleep → screen off"""
+        """Check idle timers: waiting → idle → sleepy → asleep → screen off"""
         if self.last_activity <= 0:
             return
         idle_secs = time.time() - self.last_activity
+        # 10s: Waiting — semi-idle, ready for work
+        if not self.waiting_sent and idle_secs > WAITING_TIMEOUT:
+            self.send_expression("waiting")
+            self._work_start = 0
+            self._idle_phrase = _choice(WAITING_PHRASES)
+            self._last_phrase_time = time.time()
+            self._send_idle_status(self._idle_phrase)
+            self.waiting_sent = True
+        # Rotate waiting phrases every 45s
+        if self.waiting_sent and not self.idle_sent:
+            if time.time() - self._last_phrase_time >= 45:
+                self._idle_phrase = _choice(WAITING_PHRASES)
+                self._last_phrase_time = time.time()
+                self._send_idle_status(self._idle_phrase)
+        # 3min: Full idle — fun phrases, blue text
         if not self.idle_sent and idle_secs > IDLE_TIMEOUT:
-            # Go sleepy + idle together — eyes droop and text dims at once
-            self.send_expression("sleepy")
-            self.sleepy_sent = True
-            self._work_start = 0  # Reset sustained work timer
+            self.send_expression("idle")
             self._idle_phrase = _choice(IDLE_PHRASES)
-            self._idle_dots = 0
-            self._last_dot_time = time.time()
             self._last_phrase_time = time.time()
             self._send_idle_status(self._idle_phrase)
             self.idle_sent = True
+        # Rotate idle phrases every 45s
         if self.idle_sent and not self.asleep_sent:
-            # New phrase every 8 seconds — scrolling is the animation
-            if time.time() - self._last_phrase_time >= 8:
+            if time.time() - self._last_phrase_time >= 45:
                 self._idle_phrase = _choice(IDLE_PHRASES)
                 self._last_phrase_time = time.time()
                 self._send_idle_status(self._idle_phrase)
+        # 5min: Sleepy — eyes droop
+        if not self.sleepy_sent and idle_secs > SLEEPY_TIMEOUT:
+            self.send_expression("sleepy")
+            self.sleepy_sent = True
+        # 10min: Asleep — eyes closed
         if not self.asleep_sent and idle_secs > ASLEEP_TIMEOUT:
             self.send_expression("asleep")
             self.send_status("Zzzz  Zzzzz  Zzzz  Zzzzzzz  Zzzzz")
             self.asleep_sent = True
+        # 15min: Screen off
         if not self.screen_off and idle_secs > SCREEN_OFF_TIMEOUT:
             self.send_screen(False)
 
@@ -343,6 +380,7 @@ class ActivityWatcher:
         """Handle a parsed log event"""
         event = info["event"]
         self.last_activity = time.time()
+        self.waiting_sent = False
         self.idle_sent = False
         if self.screen_off:
             self.send_screen(True)

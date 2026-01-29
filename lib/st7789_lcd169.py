@@ -17,8 +17,9 @@ class ST7789:
         self.width = 240
         self.height = 280
         
-        # Setup pins
-        self.bl = Pin(self.LCD_BL, Pin.OUT)
+        # Setup pins — PWM on backlight for dimming
+        from machine import PWM
+        self.bl = PWM(Pin(self.LCD_BL), freq=1000, duty_u16=65535)
         self.rst = Pin(self.LCD_RST, Pin.OUT)
         self.cs = Pin(self.LCD_CS, Pin.OUT)
         self.dc = Pin(self.LCD_DC, Pin.OUT)
@@ -146,7 +147,13 @@ class ST7789:
         self.fill_rect(x, y, 1, 1, color)
     
     def backlight(self, on=True):
-        self.bl.value(1 if on else 0)
+        """on=True full brightness, on=False off"""
+        self.bl.duty_u16(65535 if on else 0)
+
+    def brightness(self, pct):
+        """Set backlight brightness 0-100%"""
+        duty = int(65535 * max(0, min(100, pct)) / 100)
+        self.bl.duty_u16(duty)
 
 # Color constants (RGB888)
 BLACK = 0x000000

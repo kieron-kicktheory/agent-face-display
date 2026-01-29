@@ -73,20 +73,30 @@ def _handle_line(line, ticker, eyes, display):
         ticker.set_text("")
     
     elif line.startswith("SCREEN:"):
-        # Backlight control
+        # Backlight control — ON, OFF, or DIM:percent
         cmd = line[7:].strip().upper()
         if cmd == "OFF":
             display.backlight(False)
         elif cmd == "ON":
             display.backlight(True)
+        elif cmd.startswith("DIM:"):
+            try:
+                pct = int(cmd[4:])
+                display.brightness(pct)
+            except ValueError:
+                pass
     
     elif line.startswith("E:"):
         # Expression change — also adjusts ticker color
         expr = line[2:].strip().lower()
         eyes.set_expression(expr)
         # Ticker color matches mood
-        if expr in ("sleepy",):
+        if expr in ("waiting",):
+            ticker.set_color(0x888888)   # Soft grey when waiting
+        elif expr in ("idle",):
             ticker.set_color(0x2288FF)   # Blue when idle
+        elif expr in ("sleepy",):
+            ticker.set_color(0x2288FF)   # Blue when sleepy too
         elif expr in ("asleep",):
             ticker.set_color(0x114488)   # Dark blue when asleep
         elif expr in ("stressed",):
