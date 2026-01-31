@@ -38,6 +38,8 @@ DEFAULT_BAUD_RATE = 115200
 DEFAULT_LOG_DIR = "/tmp/clawdbot"
 DEFAULT_STATUS_HINT_FILE = "/tmp/clawdbot/status-hint.json"
 DEFAULT_HINT_MAX_AGE = 30
+DEFAULT_SIGNAL_FILE = "/tmp/clawdbot/agent-status.json"
+DEFAULT_SIGNAL_MAX_AGE = 30
 
 DEFAULT_TIMEOUTS = {
     "waiting": 10,
@@ -146,6 +148,18 @@ TOOL_EXPRESSIONS = {
     "message": "composing",
     "tts": "normal",
 }
+# Signal file state → expression mapping
+SIGNAL_STATE_EXPRESSIONS = {
+    "thinking": "thinking",
+    "searching": "searching",
+    "reading": "reading",
+    "coding": "focused",
+    "composing": "composing",
+    "reviewing": "thinking",
+    "executing": "terminal",
+    # "idle" is intentionally absent — let normal idle/sleep flow happen
+}
+
 SUSTAINED_WORK_THRESHOLD = 600  # 10 minutes of continuous work → stressed
 
 # Tool name → list of human-readable labels (picks random one)
@@ -207,6 +221,11 @@ class ActivityWatcher:
         self._status_hint_file = Path(DEFAULT_STATUS_HINT_FILE)
         self._hint_max_age = DEFAULT_HINT_MAX_AGE
         
+        # Signal file (higher-level activity status from the agent)
+        self._signal_file = Path(config.get("statusFile", DEFAULT_SIGNAL_FILE))
+        self._signal_max_age = DEFAULT_SIGNAL_MAX_AGE
+        self._last_signal_state = None  # track to avoid re-sending same state
+        
         # State
         self.ser = None
         self.current_status = ""
@@ -245,6 +264,68 @@ class ActivityWatcher:
             return text
         except (json.JSONDecodeError, OSError):
             return None
+
+    def _read_signal(self) -> dict | None:
+        """Read the signal file if it exists and is fresh (< _signal_max_age seconds).
+        Returns dict with 'state' and 'detail' keys, or None if stale/missing/corrupt."""
+        if not self._signal_file.exists():
+            return None
+        try:
+            data = json.loads(self._signal_file.read_text())
+            ts = data.get("ts", 0)
+            state = data.get("state", "").strip()
+            if not state:
+                return None
+            if time.time() - ts > self._signal_max_age:
+                return None
+            return {"state": state, "detail": data.get("detail", "")}
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def _handle_signal(self, signal_data: dict) -> bool:
+        """Handle a fresh signal file state. Returns True if signal was acted on."""
+        state = signal_data["state"]
+        detail = signal_data.get("detail", "")
+
+        # idle state = don't force expression, let normal idle flow happen
+        if state == "idle":
+            self._last_signal_state = None
+            return False
+
+        expr = SIGNAL_STATE_EXPRESSIONS.get(state)
+        if not expr:
+            return False
+
+        # Update activity timer — signal means the agent is active
+        self.last_activity = time.time()
+        self.waiting_sent = False
+        self.idle_sent = False
+
+        # Wake from sleep if needed
+        was_sleeping = self.sleepy_sent or self.asleep_sent
+        if self.screen_off:
+            self.send_screen(True)
+        if was_sleeping:
+            self.sleepy_sent = False
+            self.asleep_sent = False
+            self.current_expr = ""
+            self.send_expression("normal")
+            log("  ⏰ Woke from sleep (signal)")
+
+        # Avoid re-sending same state
+        if state == self._last_signal_state:
+            return True
+        self._last_signal_state = state
+
+        self.send_expression(expr)
+
+        # Use detail as status text, or fall back to state name
+        if detail:
+            self.send_status(f"{detail}...")
+        else:
+            self.send_status(f"{state.capitalize()}...")
+
+        return True
 
     def _connect_serial(self):
         """Connect to ESP32 without resetting it"""
@@ -461,14 +542,23 @@ class ActivityWatcher:
                     f = open(log_path, "r")
                     current_day = datetime.now().day
 
+                # Check signal file first (takes priority when fresh)
+                signal_data = self._read_signal()
+                signal_active = False
+                if signal_data:
+                    signal_active = self._handle_signal(signal_data)
+                else:
+                    self._last_signal_state = None
+
                 line = f.readline()
                 if line:
                     info = self._parse_line(line.strip())
-                    if info:
+                    if info and not signal_active:
                         self._handle_event(info)
                 else:
-                    self._check_composing_timer()
-                    self._check_idle()
+                    if not signal_active:
+                        self._check_composing_timer()
+                        self._check_idle()
                     # Periodic serial health check
                     now = time.time()
                     if now - self._last_serial_check > self._serial_check_interval:
