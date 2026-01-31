@@ -1,0 +1,11 @@
+{
+  "id": "agent-face-signal",
+  "name": "Agent Face Signal",
+  "version": "1.0.0",
+  "description": "Writes agent activity status to a signal file for the agent-face-display watcher",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
