@@ -377,6 +377,10 @@ class ActivityWatcher:
     def run(self):  # pragma: no cover
         """Main loop — tail log file and send status updates"""
         log(f"Activity watcher started for {self._agent_name}")
+        # Always ensure screen is on and expression is normal on startup
+        # (ESP32 may have been left in sleep/dim state from a previous watcher crash)
+        self.send_screen(True)
+        self.send_expression("normal")
         self.send_status("Online")
 
         log_path = self._get_log_path()
