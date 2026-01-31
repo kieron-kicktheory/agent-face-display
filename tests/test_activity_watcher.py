@@ -757,6 +757,124 @@ class TestRunLoopHelpers:
 # main() entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# New event types: discord_incoming, slow_listener, heartbeat, composing
+# ---------------------------------------------------------------------------
+
+class TestDiscordIncoming:
+    def test_parse_skipped_discord_message_returns_none(self, watcher):
+        """Skipped discord messages should be ignored entirely"""
+        line = json.dumps({
+            "0": '{"module":"discord-auto-reply"}',
+            "1": {"channelId": "123", "reason": "no-mention"},
+            "2": "discord: skipping guild message"
+        })
+        result = watcher._parse_line(line)
+        assert result is None
+
+    def test_parse_processed_discord_message(self, watcher):
+        """Non-skipped discord-auto-reply = incoming message being processed"""
+        line = json.dumps({
+            "0": '{"module":"discord-auto-reply"}',
+            "1": {"channelId": "123"},
+            "2": "discord: processing guild message"
+        })
+        result = watcher._parse_line(line)
+        assert result == {"event": "discord_incoming"}
+
+    def test_discord_incoming_shows_thinking(self, watcher):
+        """discord_incoming should immediately set thinking expression"""
+        watcher._handle_event({"event": "discord_incoming"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:thinking" in c for c in calls)
+        assert any("Reading message" in c for c in calls)
+
+    def test_discord_incoming_wakes_from_sleep(self, watcher):
+        """A processed discord message should wake the face from sleep"""
+        watcher.sleepy_sent = True
+        watcher.asleep_sent = True
+        watcher.screen_off = True
+        watcher.current_expr = "asleep"
+        watcher._handle_event({"event": "discord_incoming"})
+        assert watcher.sleepy_sent is False
+        assert watcher.asleep_sent is False
+        assert watcher.screen_off is False
+
+
+class TestSlowListener:
+    def test_parse_slow_listener(self, watcher):
+        line = json.dumps({
+            "0": '{"subsystem":"discord/monitor"}',
+            "1": {"listener": "DiscordMessageListener", "event": "MESSAGE_CREATE",
+                  "durationMs": 45294, "duration": "45.3 seconds"},
+            "2": "Slow listener detected"
+        })
+        result = watcher._parse_line(line)
+        assert result == {"event": "slow_listener"}
+
+    def test_slow_listener_keeps_expression(self, watcher):
+        """Slow listener should NOT change expression, only refresh timer"""
+        watcher.send_expression("focused")
+        watcher.ser.reset_mock()
+        old_activity = watcher.last_activity
+        time.sleep(0.01)
+        watcher._handle_event({"event": "slow_listener"})
+        assert watcher.last_activity > old_activity
+        # Should not have sent any serial commands
+        assert not watcher.ser.write.called
+
+
+class TestHeartbeatEvent:
+    def test_heartbeat_only_refreshes_timer(self, watcher):
+        """Heartbeat events should not change expression or status"""
+        watcher.send_expression("idle")
+        watcher.ser.reset_mock()
+        old_expr = watcher.current_expr
+        watcher._handle_event({"event": "heartbeat"})
+        assert watcher.current_expr == old_expr
+        assert not watcher.ser.write.called
+
+    def test_discord_infrastructure_is_heartbeat(self, watcher):
+        """Discord login/gateway messages should be heartbeat only"""
+        line = json.dumps({
+            "0": '{"subsystem":"gateway/channels/discord"}',
+            "1": "logged in to discord as 1465003863013593220",
+            "_meta": {"logLevelName": "INFO"}
+        })
+        result = watcher._parse_line(line)
+        assert result == {"event": "heartbeat"}
+
+
+class TestComposingExpression:
+    def test_message_tool_sends_composing(self, watcher):
+        """Message tool should trigger composing expression"""
+        watcher._handle_event({"event": "tool_start", "tool": "message"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:composing" in c for c in calls)
+        status_calls = [c for c in calls if c.startswith("S:")]
+        assert len(status_calls) > 0
+        status_text = status_calls[0]
+        assert any(phrase in status_text for phrase in [
+            "Writing on Discord", "Composing a reply",
+            "Typing a response", "Sending a message"
+        ])
+
+    def test_message_tool_with_hint(self, watcher, hint_file):
+        """Message tool with a hint should use the hint text"""
+        hint_file.write_text(json.dumps({"text": "Replying to Niall", "ts": time.time()}))
+        watcher._handle_event({"event": "tool_start", "tool": "message"})
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("Replying to Niall" in c for c in calls)
+
+    def test_composing_in_tool_expressions(self):
+        """message tool should map to composing expression"""
+        assert aw.TOOL_EXPRESSIONS["message"] == "composing"
+
+    def test_composing_in_ticker_colors(self):
+        """composing should have a ticker color defined"""
+        assert "composing" in aw.DEFAULT_TICKER_COLORS
+
+
 class TestMain:
     def test_main_creates_and_runs_watcher(self):
         with patch.object(aw, 'load_config', return_value={}):

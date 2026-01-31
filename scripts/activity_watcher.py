@@ -57,6 +57,7 @@ DEFAULT_TICKER_COLORS = {
     "focused": "0x44FF44",
     "terminal": "0x44FF44",
     "thinking": "0xFFAA00",
+    "composing": "0x44DDFF",
     "searching": "0xFF88FF",
     "reading": "0x88DDFF",
 }
@@ -142,7 +143,7 @@ TOOL_EXPRESSIONS = {
     "memory_get": "reading",
     "sessions_history": "reading",
     "image": "searching",
-    "message": "normal",
+    "message": "composing",
     "tts": "normal",
 }
 SUSTAINED_WORK_THRESHOLD = 600  # 10 minutes of continuous work → stressed
@@ -199,6 +200,8 @@ class ActivityWatcher:
         
         # Log file
         self._log_file = config.get("logFile", None)
+        self._log_dir = config.get("logDir", DEFAULT_LOG_DIR)
+        self._log_prefix = config.get("logPrefix", "clawdbot")
         
         # Status hint file
         self._status_hint_file = Path(DEFAULT_STATUS_HINT_FILE)
@@ -345,7 +348,7 @@ class ActivityWatcher:
         if self._log_file:
             return Path(self._log_file)
         today = datetime.now().strftime("%Y-%m-%d")
-        return Path(DEFAULT_LOG_DIR) / f"clawdbot-{today}.log"
+        return Path(self._log_dir) / f"{self._log_prefix}-{today}.log"
 
     def _parse_line(self, line: str) -> dict | None:
         """Parse a JSON log line, return relevant info"""
@@ -354,23 +357,74 @@ class ActivityWatcher:
         except json.JSONDecodeError:
             return None
 
-        msg = data.get("1", "")
-        if not msg or not isinstance(msg, str):
+        # Check all string fields for activity signals
+        fields = []
+        for key in ("0", "1", "2"):
+            val = data.get(key, "")
+            if isinstance(val, str) and val:
+                fields.append(val)
+
+        # Also stringify dict field "1" for structured log data
+        field1_dict = None
+        if isinstance(data.get("1"), dict):
+            field1_dict = data["1"]
+
+        combined = " ".join(fields)
+        if not combined.strip():
             return None
 
-        m = re.search(r"tool start:.*tool=(\w+)", msg)
+        # ── Specific tool start/end patterns (check all fields) ──
+        m = re.search(r"tool start:.*tool=(\w+)", combined)
         if m:
             return {"event": "tool_start", "tool": m.group(1)}
 
-        m = re.search(r"tool end:.*tool=(\w+)", msg)
+        m = re.search(r"tool end:.*tool=(\w+)", combined)
         if m:
             return {"event": "tool_end", "tool": m.group(1)}
 
-        if "run start:" in msg:
+        # [tools] prefix indicates tool activity (errors, completions, etc.)
+        m = re.search(r"\[tools?\]\s+(\w+)", combined)
+        if m:
+            tool = m.group(1)
+            return {"event": "tool_start", "tool": tool}
+
+        if "run start:" in combined:
             return {"event": "run_start"}
 
-        if "run end:" in msg or "run complete" in msg:
+        if "run end:" in combined or "run complete" in combined:
             return {"event": "run_end"}
+
+        # ── Discord message handling — distinguish skipped vs processed ──
+        if "discord-auto-reply" in combined:
+            # Skipped messages have "skipping guild message" in field "2"
+            if "skipping" in combined:
+                return None  # Ignore skipped messages entirely
+            # Non-skipped = bot is about to process this message → thinking
+            return {"event": "discord_incoming"}
+
+        # ── "Slow listener detected" = bot is still processing a response ──
+        if "Slow listener detected" in combined:
+            return {"event": "slow_listener"}
+
+        # ── General discord activity (not skipped messages) ──
+        if "discord:" in combined:
+            # Filter out infrastructure noise
+            if any(noise in combined for noise in (
+                "logged in", "starting provider", "Discord Message Content Intent",
+                "WebSocket connection closed", "Attempting resume",
+                "discord gateway:"
+            )):
+                return {"event": "heartbeat"}
+            return {"event": "run_start"}
+
+        # ── Non-discord tool/run activity keeps the face awake ──
+        level = data.get("_meta", {}).get("logLevelName", "")
+        if level in ("INFO", "WARN", "ERROR", "DEBUG"):
+            # Only treat actual tool/run log lines as activity, not infrastructure
+            if "[tools]" in combined or "tool " in combined or "run " in combined:
+                return {"event": "run_start"}
+            # Other log lines are just a heartbeat (prevents sleeping)
+            return {"event": "heartbeat"}
 
         return None
 
@@ -476,6 +530,18 @@ class ActivityWatcher:
     def _handle_event(self, info: dict):
         """Handle a parsed log event"""
         event = info["event"]
+
+        # Heartbeat events only update last_activity timer — no expression/status change
+        if event == "heartbeat":
+            self.last_activity = time.time()
+            return
+
+        # Slow listener = bot is still working on a response; refresh timer but
+        # don't change expression/status (keeps the current working state)
+        if event == "slow_listener":
+            self.last_activity = time.time()
+            return
+
         self.last_activity = time.time()
         self.waiting_sent = False
         self.idle_sent = False
@@ -495,9 +561,29 @@ class ActivityWatcher:
         if self._work_start == 0:
             self._work_start = time.time()
 
-        if event == "tool_start":
+        if event == "discord_incoming":
+            # Discord message received and being processed → immediate thinking face
+            self.send_expression("thinking")
+            self.send_status("Reading message...")
+
+        elif event == "tool_start":
             tool = info["tool"]
             if tool in ("process",):
+                return
+
+            # Special handling for message tool → composing/writing on Discord
+            if tool == "message":
+                self.send_expression("composing")
+                hint = self._read_hint()
+                if hint:
+                    self.send_status(f"{hint}...")
+                else:
+                    self.send_status(_choice([
+                        "Writing on Discord...",
+                        "Composing a reply...",
+                        "Typing a response...",
+                        "Sending a message...",
+                    ]))
                 return
             
             if tool == self._tool_streak:
