@@ -789,6 +789,11 @@ class TestDiscordIncoming:
         assert any("E:thinking" in c for c in calls)
         assert any("Reading message" in c for c in calls)
 
+    def test_discord_incoming_sets_composing_timer(self, watcher):
+        """discord_incoming should schedule a composing transition"""
+        watcher._handle_event({"event": "discord_incoming"})
+        assert watcher._composing_at > 0
+
     def test_discord_incoming_wakes_from_sleep(self, watcher):
         """A processed discord message should wake the face from sleep"""
         watcher.sleepy_sent = True
@@ -873,6 +878,101 @@ class TestComposingExpression:
     def test_composing_in_ticker_colors(self):
         """composing should have a ticker color defined"""
         assert "composing" in aw.DEFAULT_TICKER_COLORS
+
+
+class TestComposingTimer:
+    def test_timer_fires_when_thinking(self, watcher):
+        """Composing timer should transition from thinking to composing"""
+        watcher._handle_event({"event": "discord_incoming"})
+        assert watcher.current_expr == "thinking"
+        # Simulate timer elapsed
+        watcher._composing_at = time.time() - 1
+        watcher._check_composing_timer()
+        assert watcher.current_expr == "composing"
+        # Timer should be cleared
+        assert watcher._composing_at == 0
+
+    def test_timer_does_not_fire_before_delay(self, watcher):
+        """Composing timer should not fire if delay hasn't elapsed"""
+        watcher._handle_event({"event": "discord_incoming"})
+        assert watcher.current_expr == "thinking"
+        # Timer is in the future
+        watcher._check_composing_timer()
+        assert watcher.current_expr == "thinking"
+
+    def test_timer_skips_if_not_thinking(self, watcher):
+        """Composing timer should not fire if expression changed from thinking"""
+        watcher._composing_at = time.time() - 1
+        watcher.current_expr = "focused"  # Something else happened
+        watcher._check_composing_timer()
+        assert watcher.current_expr == "focused"
+        assert watcher._composing_at == 0
+
+    def test_timer_cleared_on_run_end(self, watcher):
+        """run_end should cancel pending composing timer"""
+        watcher._handle_event({"event": "discord_incoming"})
+        assert watcher._composing_at > 0
+        watcher._handle_event({"event": "run_end"})
+        assert watcher._composing_at == 0
+
+    def test_timer_shows_composing_status(self, watcher):
+        """When composing timer fires, status should show composing text"""
+        watcher._handle_event({"event": "discord_incoming"})
+        watcher.ser.reset_mock()
+        watcher._composing_at = time.time() - 1
+        watcher._check_composing_timer()
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        status_calls = [c for c in calls if c.startswith("S:")]
+        assert len(status_calls) > 0
+        assert any(phrase in status_calls[0] for phrase in [
+            "Writing on Discord", "Composing a reply",
+            "Typing a response", "Sending a message"
+        ])
+
+    def test_timer_with_hint(self, watcher, hint_file):
+        """Composing timer should use hint text if available"""
+        hint_file.write_text(json.dumps({"text": "Replying to Bobby", "ts": time.time()}))
+        watcher._handle_event({"event": "discord_incoming"})
+        watcher.ser.reset_mock()
+        watcher._composing_at = time.time() - 1
+        watcher._check_composing_timer()
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("Replying to Bobby" in c for c in calls)
+
+    def test_no_timer_when_not_set(self, watcher):
+        """No composing transition when timer is 0"""
+        watcher._composing_at = 0
+        watcher.current_expr = "thinking"
+        watcher._check_composing_timer()
+        assert watcher.current_expr == "thinking"
+
+    def test_full_discord_flow(self, watcher):
+        """Full flow: discord_incoming → thinking → composing → done"""
+        # Step 1: Incoming message → thinking
+        watcher._handle_event({"event": "discord_incoming"})
+        assert watcher.current_expr == "thinking"
+
+        # Step 2: Timer fires → composing
+        watcher._composing_at = time.time() - 1
+        watcher._check_composing_timer()
+        assert watcher.current_expr == "composing"
+
+        # Step 3: Run ends → done
+        watcher._handle_event({"event": "run_end"})
+        assert watcher.current_expr == "done"
+
+
+class TestToolsPatternRemoved:
+    def test_tools_error_line_not_parsed_as_tool_start(self, watcher):
+        """[tools] error lines should NOT be parsed as tool_start events"""
+        line = json.dumps({
+            "0": "[tools] message failed: some error",
+            "_meta": {"logLevelName": "ERROR"}
+        })
+        result = watcher._parse_line(line)
+        # Should be treated as a generic run_start (from the [tools] keyword in INFO/ERROR check)
+        # but NOT as a tool_start with tool="message"
+        assert result is None or result.get("event") != "tool_start" or result.get("tool") != "message"
 
 
 class TestMain:

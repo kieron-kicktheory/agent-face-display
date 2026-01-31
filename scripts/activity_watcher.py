@@ -226,6 +226,8 @@ class ActivityWatcher:
         self._work_start = 0
         self._last_serial_check = 0
         self._serial_check_interval = 30  # Check serial health every 30s
+        self._composing_at = 0  # timestamp when we should transition to composing
+        self._composing_delay = 3  # seconds after discord_incoming to switch to composing
         self._connect_serial()
 
     def _read_hint(self) -> str | None:
@@ -382,11 +384,8 @@ class ActivityWatcher:
         if m:
             return {"event": "tool_end", "tool": m.group(1)}
 
-        # [tools] prefix indicates tool activity (errors, completions, etc.)
-        m = re.search(r"\[tools?\]\s+(\w+)", combined)
-        if m:
-            tool = m.group(1)
-            return {"event": "tool_start", "tool": tool}
+        # Note: [tools] prefix only appears in error lines (e.g. "[tools] message failed:")
+        # so we skip it — it doesn't indicate actual tool usage.
 
         if "run start:" in combined:
             return {"event": "run_start"}
@@ -468,6 +467,7 @@ class ActivityWatcher:
                     if info:
                         self._handle_event(info)
                 else:
+                    self._check_composing_timer()
                     self._check_idle()
                     # Periodic serial health check
                     now = time.time()
@@ -481,6 +481,23 @@ class ActivityWatcher:
             self.clear_status()
             if f:
                 f.close()
+
+    def _check_composing_timer(self):
+        """If composing timer is set and has elapsed, transition to composing"""
+        if self._composing_at > 0 and time.time() >= self._composing_at:
+            self._composing_at = 0
+            if self.current_expr == "thinking":
+                self.send_expression("composing")
+                hint = self._read_hint()
+                if hint:
+                    self.send_status(f"{hint}...")
+                else:
+                    self.send_status(_choice([
+                        "Writing on Discord...",
+                        "Composing a reply...",
+                        "Typing a response...",
+                        "Sending a message...",
+                    ]))
 
     def _check_idle(self):
         """Check idle timers: waiting → idle → sleepy → asleep → screen off"""
@@ -563,8 +580,10 @@ class ActivityWatcher:
 
         if event == "discord_incoming":
             # Discord message received and being processed → immediate thinking face
+            # After a delay, transition to composing (the bot is generating a reply)
             self.send_expression("thinking")
             self.send_status("Reading message...")
+            self._composing_at = time.time() + self._composing_delay
 
         elif event == "tool_start":
             tool = info["tool"]
@@ -620,6 +639,7 @@ class ActivityWatcher:
             self.send_status("Thinking...")
 
         elif event == "run_end":
+            self._composing_at = 0  # Cancel any pending composing transition
             self.send_expression("done")
             self.send_status(_choice(["Done", "Finished", "All done", "Wrapped up"]))
 
