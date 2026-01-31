@@ -1,0 +1,77 @@
+{
+  "agent": {
+    "name": "Bobby",
+    "serialPort": "/dev/cu.usbmodem21101"
+  },
+  "eyes": {
+    "irisColor": "0x8B6914",
+    "pupilSize": 18,
+    "irisSize": 36,
+    "eyeWidth": 60,
+    "eyeHeight": 65,
+    "eyeSpacing": 24,
+    "cornerRadius": 18,
+    "defaultExpression": "happy",
+    "blinkInterval": [4000, 8000],
+    "eyebrows": {
+      "thickness": 3,
+      "gap": 4,
+      "color": "0xCCCCCC"
+    },
+    "crowsFeet": true,
+    "happySquint": 18
+  },
+  "ticker": {
+    "colors": {
+      "active": "0xFFFFFF",
+      "waiting": "0x99AA88",
+      "idle": "0x4488AA",
+      "sleepy": "0x4488AA",
+      "asleep": "0x224466",
+      "stressed": "0xDD6644",
+      "focused": "0x66CC66",
+      "terminal": "0x66CC66",
+      "thinking": "0xDDAA33",
+      "searching": "0xCC88CC",
+      "reading": "0x88BBDD"
+    },
+    "scrollSpeed": 35
+  },
+  "phrases": {
+    "waiting": [
+      "At your service",
+      "Ready and waiting",
+      "Standing by, boss",
+      "Waiting patiently",
+      "Here if you need me",
+      "On standby",
+      "Ready for the whistle",
+      "Just say the word"
+    ],
+    "idle": [
+      "The first ninety minutes are the most important",
+      "Practice makes permanent",
+      "What is a club in any case?",
+      "Analysing the beautiful game",
+      "Studying the form book",
+      "Scouting for insights",
+      "Reviewing match data",
+      "Knowledge is power in football",
+      "Patience is a virtue, they say",
+      "Every match tells a story",
+      "Football is a simple game",
+      "Wisdom comes from experience",
+      "The game is about glory",
+      "Thinking about tactics",
+      "Contemplating the next move"
+    ]
+  },
+  "timeouts": {
+    "waiting": 10,
+    "idle": 180,
+    "sleepy": 300,
+    "asleep": 600,
+    "screenOff": 900
+  },
+  "logFile": null
+}

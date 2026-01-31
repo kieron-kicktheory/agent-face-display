@@ -1,0 +1,99 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Face Display Configuration",
+  "description": "Per-agent config for the ESP32 face display and Mac activity watcher",
+  "type": "object",
+  "properties": {
+    "agent": {
+      "type": "object",
+      "description": "Agent identity",
+      "properties": {
+        "name": { "type": "string", "description": "Agent name (shown in logs)" },
+        "serialPort": { "type": "string", "description": "USB serial port path" }
+      },
+      "required": ["name", "serialPort"]
+    },
+    "eyes": {
+      "type": "object",
+      "description": "Eye appearance and behavior (sent to ESP32)",
+      "properties": {
+        "irisColor": { "type": "string", "description": "Iris color as hex string, e.g. '0x2288FF'" },
+        "pupilSize": { "type": "integer", "description": "Pupil square size in pixels", "default": 20 },
+        "irisSize": { "type": "integer", "description": "Iris square size in pixels", "default": 40 },
+        "eyeWidth": { "type": "integer", "description": "Eye width in pixels", "default": 70 },
+        "eyeHeight": { "type": "integer", "description": "Eye height in pixels", "default": 80 },
+        "eyeSpacing": { "type": "integer", "description": "Gap between eyes in pixels", "default": 20 },
+        "cornerRadius": { "type": "integer", "description": "Rounded corner radius", "default": 15 },
+        "defaultExpression": { "type": "string", "description": "Expression on boot", "default": "normal", "enum": ["normal", "happy"] },
+        "blinkInterval": {
+          "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2,
+          "description": "Min/max blink interval in ms", "default": [3000, 6000]
+        },
+        "eyebrows": {
+          "type": "object",
+          "description": "Eyebrow rendering (null or absent = no eyebrows)",
+          "properties": {
+            "thickness": { "type": "integer", "description": "Eyebrow height in pixels", "default": 3 },
+            "gap": { "type": "integer", "description": "Gap between eyebrow and eye top in pixels", "default": 4 },
+            "color": { "type": "string", "description": "Eyebrow color hex", "default": "0xFFFFFF" }
+          }
+        },
+        "crowsFeet": { "type": "boolean", "description": "Show crow's feet (smile lines) at eye corners", "default": false },
+        "happySquint": { "type": "integer", "description": "Default eyelid droop % for happy expression (0=none, 15-25=friendly squint)", "default": 0 }
+      }
+    },
+    "ticker": {
+      "type": "object",
+      "description": "Status ticker appearance",
+      "properties": {
+        "colors": {
+          "type": "object",
+          "description": "Ticker text colors per expression (hex strings)",
+          "properties": {
+            "active": { "type": "string", "default": "0xFFFFFF" },
+            "waiting": { "type": "string", "default": "0x888888" },
+            "idle": { "type": "string", "default": "0x2288FF" },
+            "sleepy": { "type": "string", "default": "0x2288FF" },
+            "asleep": { "type": "string", "default": "0x114488" },
+            "stressed": { "type": "string", "default": "0xFF4444" },
+            "focused": { "type": "string", "default": "0x44FF44" },
+            "terminal": { "type": "string", "default": "0x44FF44" },
+            "thinking": { "type": "string", "default": "0xFFAA00" },
+            "searching": { "type": "string", "default": "0xFF88FF" },
+            "reading": { "type": "string", "default": "0x88DDFF" }
+          }
+        },
+        "scrollSpeed": { "type": "integer", "description": "ms per scroll step", "default": 30 }
+      }
+    },
+    "phrases": {
+      "type": "object",
+      "description": "Status phrases shown on the ticker",
+      "properties": {
+        "waiting": {
+          "type": "array", "items": { "type": "string" },
+          "description": "Phrases shown when waiting for input"
+        },
+        "idle": {
+          "type": "array", "items": { "type": "string" },
+          "description": "Fun phrases shown when idle for a while"
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "description": "Idle state transition timeouts in seconds",
+      "properties": {
+        "waiting": { "type": "integer", "default": 10 },
+        "idle": { "type": "integer", "default": 180 },
+        "sleepy": { "type": "integer", "default": 300 },
+        "asleep": { "type": "integer", "default": 600 },
+        "screenOff": { "type": "integer", "default": 900 }
+      }
+    },
+    "logFile": {
+      "type": ["string", "null"],
+      "description": "Log file path (null = auto-detect from today's date)"
+    }
+  }
+}

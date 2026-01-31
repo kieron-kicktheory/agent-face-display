@@ -23,22 +23,88 @@ import activity_watcher as aw
 
 @pytest.fixture
 def watcher():
-    """Create a watcher with mocked serial"""
+    """Create a watcher with mocked serial and default config"""
     with patch.object(aw.ActivityWatcher, '_connect_serial'):
-        w = aw.ActivityWatcher()
+        w = aw.ActivityWatcher({})
         w.ser = MagicMock()
         w.ser.is_open = True
         return w
 
 
 @pytest.fixture
-def hint_file(tmp_path):
+def custom_watcher():
+    """Create a watcher with custom config"""
+    config = {
+        "agent": {"name": "Bobby", "serialPort": "/dev/cu.usbmodem99999"},
+        "timeouts": {"waiting": 5, "idle": 60, "sleepy": 120, "asleep": 240, "screenOff": 360},
+        "phrases": {
+            "waiting": ["Ready for the whistle"],
+            "idle": ["The first ninety minutes are the most important"],
+        },
+        "logFile": "/tmp/custom-log.log",
+    }
+    with patch.object(aw.ActivityWatcher, '_connect_serial'):
+        w = aw.ActivityWatcher(config)
+        w.ser = MagicMock()
+        w.ser.is_open = True
+        return w
+
+
+@pytest.fixture
+def hint_file(tmp_path, watcher):
     """Temp hint file"""
     hint = tmp_path / "status-hint.json"
-    original = aw.STATUS_HINT_FILE
-    aw.STATUS_HINT_FILE = str(hint)
+    watcher._status_hint_file = hint
     yield hint
-    aw.STATUS_HINT_FILE = original
+
+
+# ---------------------------------------------------------------------------
+# Config loading
+# ---------------------------------------------------------------------------
+
+class TestConfigLoading:
+    def test_default_config_values(self, watcher):
+        assert watcher.WAITING_TIMEOUT == aw.DEFAULT_TIMEOUTS["waiting"]
+        assert watcher.IDLE_TIMEOUT == aw.DEFAULT_TIMEOUTS["idle"]
+        assert watcher.SLEEPY_TIMEOUT == aw.DEFAULT_TIMEOUTS["sleepy"]
+        assert watcher.ASLEEP_TIMEOUT == aw.DEFAULT_TIMEOUTS["asleep"]
+        assert watcher.SCREEN_OFF_TIMEOUT == aw.DEFAULT_TIMEOUTS["screenOff"]
+        assert watcher._agent_name == "Agent"
+        assert watcher._serial_port == aw.DEFAULT_SERIAL_PORT
+
+    def test_custom_config_values(self, custom_watcher):
+        assert custom_watcher.WAITING_TIMEOUT == 5
+        assert custom_watcher.IDLE_TIMEOUT == 60
+        assert custom_watcher.SLEEPY_TIMEOUT == 120
+        assert custom_watcher.ASLEEP_TIMEOUT == 240
+        assert custom_watcher.SCREEN_OFF_TIMEOUT == 360
+        assert custom_watcher._agent_name == "Bobby"
+        assert custom_watcher._serial_port == "/dev/cu.usbmodem99999"
+        assert custom_watcher.WAITING_PHRASES == ["Ready for the whistle"]
+        assert custom_watcher.IDLE_PHRASES == ["The first ninety minutes are the most important"]
+
+    def test_custom_log_file(self, custom_watcher):
+        path = custom_watcher._get_log_path()
+        assert str(path) == "/tmp/custom-log.log"
+
+    def test_load_config_missing_file(self, tmp_path):
+        with patch.object(aw, 'CONFIG_PATH', tmp_path / "nonexistent.json"):
+            cfg = aw.load_config()
+            assert cfg == {}
+
+    def test_load_config_valid_file(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"agent": {"name": "Test", "serialPort": "/dev/test"}}))
+        with patch.object(aw, 'CONFIG_PATH', cfg_file):
+            cfg = aw.load_config()
+            assert cfg["agent"]["name"] == "Test"
+
+    def test_load_config_invalid_json(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text("not json{{{")
+        with patch.object(aw, 'CONFIG_PATH', cfg_file):
+            cfg = aw.load_config()
+            assert cfg == {}
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +192,11 @@ class TestStatusHints:
         assert watcher._read_hint() is None
 
     def test_hint_at_boundary(self, watcher, hint_file):
-        """Hint exactly at max age should still be valid"""
-        hint_file.write_text(json.dumps({"text": "Boundary", "ts": time.time() - aw.HINT_MAX_AGE + 1}))
+        hint_file.write_text(json.dumps({"text": "Boundary", "ts": time.time() - watcher._hint_max_age + 1}))
         assert watcher._read_hint() == "Boundary"
 
     def test_hint_just_past_boundary(self, watcher, hint_file):
-        hint_file.write_text(json.dumps({"text": "Expired", "ts": time.time() - aw.HINT_MAX_AGE - 1}))
+        hint_file.write_text(json.dumps({"text": "Expired", "ts": time.time() - watcher._hint_max_age - 1}))
         assert watcher._read_hint() is None
 
 
@@ -182,7 +247,7 @@ class TestSendExpression:
 class TestSendScreen:
     def test_screen_off(self, watcher):
         watcher.send_screen(False)
-        watcher.ser.write.assert_called_with(b"SCREEN:OFF\n")
+        watcher.ser.write.assert_called_with(b"SCREEN:DIM:10\n")
         assert watcher.screen_off is True
 
     def test_screen_on(self, watcher):
@@ -202,9 +267,7 @@ class TestSendScreen:
 class TestSendIdleStatus:
     def test_pads_short_text(self, watcher):
         watcher._send_idle_status("Hi")
-        # "Hi..." = 5 chars, padded to 25 — sent as "S:Hi...                    \n"
         call_args = watcher.ser.write.call_args[0][0].decode()
-        # Full payload between "S:" and "\n"
         payload = call_args[2:-1]
         assert payload.startswith("Hi...")
         assert len(payload) >= 25
@@ -278,7 +341,6 @@ class TestHandleEvent:
         watcher._handle_event({"event": "tool_start", "tool": "read"})
         assert watcher.sleepy_sent is False
         assert watcher.asleep_sent is False
-        # Should have sent normal expression
         calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
         assert any("E:normal" in c for c in calls)
 
@@ -330,7 +392,6 @@ class TestStreaks:
 
 class TestToolLabels:
     def test_all_known_tools_have_labels(self):
-        """Every tool in TOOL_LABELS should have at least one label"""
         for tool, labels in aw.TOOL_LABELS.items():
             assert len(labels) >= 1, f"{tool} has no labels"
             for label in labels:
@@ -380,7 +441,6 @@ class TestExpressionMapping:
         assert any("E:done" in c for c in calls)
 
     def test_unknown_tool_sends_normal(self, watcher):
-        # First set a different expression so normal isn't deduped
         watcher.current_expr = "focused"
         watcher._handle_event({"event": "tool_start", "tool": "some_new_tool"})
         calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
@@ -399,7 +459,7 @@ class TestExpressionMapping:
 
     def test_work_timer_resets_on_idle(self, watcher):
         watcher._work_start = time.time() - 100
-        watcher.last_activity = time.time() - aw.IDLE_TIMEOUT - 1
+        watcher.last_activity = time.time() - watcher.IDLE_TIMEOUT - 1
         watcher._check_idle()
         assert watcher._work_start == 0
 
@@ -425,17 +485,23 @@ class TestExpressionMapping:
 
 
 # ---------------------------------------------------------------------------
-# Idle phrases
+# Idle phrases — use config-driven phrases
 # ---------------------------------------------------------------------------
 
 class TestIdlePhrases:
-    def test_phrases_exist(self):
-        assert len(aw.IDLE_PHRASES) > 10
+    def test_default_phrases_exist(self, watcher):
+        assert len(watcher.IDLE_PHRASES) > 10
+        assert len(watcher.WAITING_PHRASES) > 5
 
-    def test_phrases_are_strings(self):
-        for phrase in aw.IDLE_PHRASES:
-            assert isinstance(phrase, str)
-            assert len(phrase) > 0
+    def test_phrases_are_strings(self, watcher):
+        for phrase in watcher.IDLE_PHRASES:
+            assert isinstance(phrase, str) and len(phrase) > 0
+        for phrase in watcher.WAITING_PHRASES:
+            assert isinstance(phrase, str) and len(phrase) > 0
+
+    def test_custom_phrases_used(self, custom_watcher):
+        assert custom_watcher.IDLE_PHRASES == ["The first ninety minutes are the most important"]
+        assert custom_watcher.WAITING_PHRASES == ["Ready for the whistle"]
 
 
 # ---------------------------------------------------------------------------
@@ -443,17 +509,18 @@ class TestIdlePhrases:
 # ---------------------------------------------------------------------------
 
 class TestTimeouts:
-    def test_idle_timeout_is_5_minutes(self):
-        assert aw.IDLE_TIMEOUT == 300
+    def test_default_timeout_ordering(self, watcher):
+        assert watcher.WAITING_TIMEOUT < watcher.IDLE_TIMEOUT
+        assert watcher.IDLE_TIMEOUT <= watcher.SLEEPY_TIMEOUT
+        assert watcher.SLEEPY_TIMEOUT <= watcher.ASLEEP_TIMEOUT
+        assert watcher.ASLEEP_TIMEOUT <= watcher.SCREEN_OFF_TIMEOUT
 
-    def test_asleep_timeout_is_10_minutes(self):
-        assert aw.ASLEEP_TIMEOUT == 600
-
-    def test_screen_off_timeout_is_15_minutes(self):
-        assert aw.SCREEN_OFF_TIMEOUT == 900
-
-    def test_timeout_ordering(self):
-        assert aw.IDLE_TIMEOUT <= aw.ASLEEP_TIMEOUT <= aw.SCREEN_OFF_TIMEOUT
+    def test_custom_timeouts(self, custom_watcher):
+        assert custom_watcher.WAITING_TIMEOUT == 5
+        assert custom_watcher.IDLE_TIMEOUT == 60
+        assert custom_watcher.SLEEPY_TIMEOUT == 120
+        assert custom_watcher.ASLEEP_TIMEOUT == 240
+        assert custom_watcher.SCREEN_OFF_TIMEOUT == 360
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +534,10 @@ class TestGetLogPath:
         assert str(path).endswith(".log")
         assert "/tmp/clawdbot/" in str(path)
 
+    def test_custom_log_path(self, custom_watcher):
+        path = custom_watcher._get_log_path()
+        assert str(path) == "/tmp/custom-log.log"
+
 
 # ---------------------------------------------------------------------------
 # Serial connection
@@ -478,10 +549,12 @@ class TestConnectSerial:
             mock_ser = MagicMock()
             MockSerial.return_value = mock_ser
             w = aw.ActivityWatcher.__new__(aw.ActivityWatcher)
+            w._serial_port = "/dev/cu.test"
+            w._agent_name = "Test"
             w.ser = None
             w._connect_serial()
-            assert mock_ser.port == aw.SERIAL_PORT
-            assert mock_ser.baudrate == aw.BAUD_RATE
+            assert mock_ser.port == "/dev/cu.test"
+            assert mock_ser.baudrate == aw.DEFAULT_BAUD_RATE
             assert mock_ser.dtr is False
             assert mock_ser.rts is False
             mock_ser.open.assert_called_once()
@@ -493,6 +566,8 @@ class TestConnectSerial:
             mock_ser.open.side_effect = SerialException("not found")
             MockSerial.return_value = mock_ser
             w = aw.ActivityWatcher.__new__(aw.ActivityWatcher)
+            w._serial_port = "/dev/cu.test"
+            w._agent_name = "Test"
             w.ser = None
             w._connect_serial()
             assert w.ser is None
@@ -512,28 +587,24 @@ class TestSerialNotOpen:
     def test_send_expression_reconnects_when_not_open(self, watcher):
         watcher.ser = None
         watcher.current_expr = ""
-        # Should not raise
         watcher.send_expression("sleepy")
 
     def test_send_expression_serial_error(self, watcher):
         from serial import SerialException
         watcher.ser.write.side_effect = SerialException("gone")
         with patch.object(watcher, '_connect_serial') as mock:
-            watcher.current_expr = ""  # Reset to allow send
+            watcher.current_expr = ""
             watcher.send_expression("sleepy")
             mock.assert_called_once()
 
     def test_send_screen_when_serial_none(self, watcher):
         watcher.ser = None
-        # When serial is None, the `if self.ser and self.ser.is_open` guard is False
-        # so it silently does nothing (no reconnect in send_screen)
         watcher.send_screen(False)
-        # No crash is the test
 
     def test_clear_status_serial_error(self, watcher):
         from serial import SerialException
         watcher.ser.write.side_effect = SerialException("gone")
-        watcher.clear_status()  # Should not raise
+        watcher.clear_status()
 
 
 # ---------------------------------------------------------------------------
@@ -570,27 +641,33 @@ class TestSetStatusHintScript:
 
 
 # ---------------------------------------------------------------------------
-# Run loop integration (partial — test day rollover logic etc.)
+# Idle state machine
 # ---------------------------------------------------------------------------
 
 class TestCheckIdle:
     def test_no_activity_yet(self, watcher):
-        """No activity timestamp → no idle transition"""
         watcher.last_activity = 0
         watcher._check_idle()
         assert not watcher.idle_sent
 
     def test_becomes_idle_after_timeout(self, watcher):
-        watcher.last_activity = time.time() - aw.IDLE_TIMEOUT - 1
+        watcher.last_activity = time.time() - watcher.IDLE_TIMEOUT - 1
         watcher._check_idle()
         assert watcher.idle_sent
+        calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
+        assert any("E:idle" in c for c in calls)
+
+    def test_becomes_sleepy_after_timeout(self, watcher):
+        watcher.last_activity = time.time() - watcher.SLEEPY_TIMEOUT - 1
+        watcher.idle_sent = True
+        watcher.current_expr = "idle"
+        watcher._check_idle()
         assert watcher.sleepy_sent
-        # Should have sent sleepy expression and idle status
         calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
         assert any("E:sleepy" in c for c in calls)
 
     def test_becomes_asleep_after_timeout(self, watcher):
-        watcher.last_activity = time.time() - aw.ASLEEP_TIMEOUT - 1
+        watcher.last_activity = time.time() - watcher.ASLEEP_TIMEOUT - 1
         watcher.idle_sent = True
         watcher.sleepy_sent = True
         watcher.current_expr = "sleepy"
@@ -601,7 +678,7 @@ class TestCheckIdle:
         assert any("Zzzz" in c for c in calls)
 
     def test_screen_off_after_timeout(self, watcher):
-        watcher.last_activity = time.time() - aw.SCREEN_OFF_TIMEOUT - 1
+        watcher.last_activity = time.time() - watcher.SCREEN_OFF_TIMEOUT - 1
         watcher.idle_sent = True
         watcher.sleepy_sent = True
         watcher.asleep_sent = True
@@ -609,43 +686,61 @@ class TestCheckIdle:
         watcher._check_idle()
         assert watcher.screen_off
         calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list]
-        assert any("SCREEN:OFF" in c for c in calls)
+        assert any("SCREEN:DIM:10" in c for c in calls)
 
     def test_idle_phrase_rotation(self, watcher):
-        """After 8 seconds idle, phrase should rotate"""
-        watcher.last_activity = time.time() - aw.IDLE_TIMEOUT - 1
+        watcher.last_activity = time.time() - watcher.IDLE_TIMEOUT - 1
         watcher.idle_sent = True
         watcher.sleepy_sent = True
         watcher.current_expr = "sleepy"
-        watcher._last_phrase_time = time.time() - 9  # 9 seconds ago
+        watcher._last_phrase_time = time.time() - 46
         watcher._check_idle()
-        # Should have sent a new idle phrase
         assert watcher.ser.write.called
 
     def test_no_phrase_rotation_too_soon(self, watcher):
-        """Within 8 seconds, no phrase rotation"""
-        watcher.last_activity = time.time() - aw.IDLE_TIMEOUT - 1
+        """Within 45 seconds, no phrase rotation — but sleepy transition may fire"""
+        watcher.last_activity = time.time() - watcher.SLEEPY_TIMEOUT - 1
         watcher.idle_sent = True
         watcher.sleepy_sent = True
+        watcher.asleep_sent = False
         watcher.current_expr = "sleepy"
-        watcher._last_phrase_time = time.time() - 3  # Only 3 seconds ago
+        watcher._last_phrase_time = time.time() - 3
         watcher._check_idle()
-        assert not watcher.ser.write.called
+        # No phrase rotation (too soon), but asleep won't fire either (not past ASLEEP_TIMEOUT)
+        # Re-test with shorter idle time to truly isolate phrase rotation
+        watcher2_activity = time.time() - watcher.IDLE_TIMEOUT - 1
+        watcher.last_activity = watcher2_activity
+        watcher.ser.reset_mock()
+        watcher._last_phrase_time = time.time() - 3
+        watcher._check_idle()
+        # Should not have sent any status (phrase rotation needs 45s)
+        status_calls = [c[0][0].decode() for c in watcher.ser.write.call_args_list if c[0][0].decode().startswith("S:")]
+        assert len(status_calls) == 0
 
     def test_full_idle_sequence(self, watcher):
-        """Test the full idle → sleepy → asleep → screen off progression"""
-        # Step 1: Go idle
-        watcher.last_activity = time.time() - aw.IDLE_TIMEOUT - 1
+        """Test the full waiting → idle → sleepy → asleep → screen off progression"""
+        # Step 1: Go waiting
+        watcher.last_activity = time.time() - watcher.WAITING_TIMEOUT - 1
         watcher._check_idle()
-        assert watcher.idle_sent and watcher.sleepy_sent
+        assert watcher.waiting_sent
 
-        # Step 2: Go asleep
-        watcher.last_activity = time.time() - aw.ASLEEP_TIMEOUT - 1
+        # Step 2: Go idle
+        watcher.last_activity = time.time() - watcher.IDLE_TIMEOUT - 1
+        watcher._check_idle()
+        assert watcher.idle_sent
+
+        # Step 3: Go sleepy
+        watcher.last_activity = time.time() - watcher.SLEEPY_TIMEOUT - 1
+        watcher._check_idle()
+        assert watcher.sleepy_sent
+
+        # Step 4: Go asleep
+        watcher.last_activity = time.time() - watcher.ASLEEP_TIMEOUT - 1
         watcher._check_idle()
         assert watcher.asleep_sent
 
-        # Step 3: Screen off
-        watcher.last_activity = time.time() - aw.SCREEN_OFF_TIMEOUT - 1
+        # Step 5: Screen off
+        watcher.last_activity = time.time() - watcher.SCREEN_OFF_TIMEOUT - 1
         watcher._check_idle()
         assert watcher.screen_off
 
@@ -664,9 +759,10 @@ class TestRunLoopHelpers:
 
 class TestMain:
     def test_main_creates_and_runs_watcher(self):
-        with patch.object(aw.ActivityWatcher, '__init__', return_value=None) as mock_init:
-            with patch.object(aw.ActivityWatcher, 'run') as mock_run:
-                mock_run.return_value = None
-                aw.main()
-                mock_init.assert_called_once()
-                mock_run.assert_called_once()
+        with patch.object(aw, 'load_config', return_value={}):
+            with patch.object(aw.ActivityWatcher, '__init__', return_value=None) as mock_init:
+                with patch.object(aw.ActivityWatcher, 'run') as mock_run:
+                    mock_run.return_value = None
+                    aw.main()
+                    mock_init.assert_called_once_with({})
+                    mock_run.assert_called_once()

@@ -1,0 +1,92 @@
+{
+  "agent": {
+    "name": "Kieron",
+    "serialPort": "/dev/cu.usbmodem21101"
+  },
+  "eyes": {
+    "irisColor": "0x2288FF",
+    "pupilSize": 20,
+    "irisSize": 40,
+    "eyeWidth": 70,
+    "eyeHeight": 80,
+    "eyeSpacing": 20,
+    "cornerRadius": 15,
+    "defaultExpression": "normal",
+    "blinkInterval": [3000, 6000]
+  },
+  "ticker": {
+    "colors": {
+      "active": "0xFFFFFF",
+      "waiting": "0x888888",
+      "idle": "0x2288FF",
+      "sleepy": "0x2288FF",
+      "asleep": "0x114488",
+      "stressed": "0xFF4444",
+      "focused": "0x44FF44",
+      "terminal": "0x44FF44",
+      "thinking": "0xFFAA00",
+      "searching": "0xFF88FF",
+      "reading": "0x88DDFF"
+    },
+    "scrollSpeed": 30
+  },
+  "phrases": {
+    "waiting": [
+      "Nothing to do",
+      "Awaiting orders",
+      "Standing by",
+      "Ready when you are",
+      "At your service",
+      "Waiting for instructions",
+      "On standby",
+      "All ears",
+      "Ready to go",
+      "Just say the word",
+      "Twiddling my thumbs",
+      "Waiting patiently",
+      "Here if you need me",
+      "Standing at the ready",
+      "Idle hands over here"
+    ],
+    "idle": [
+      "Twiddling my thumbs",
+      "Daydreaming about pixels",
+      "Plotting world domination",
+      "Contemplating my existence",
+      "Staring into the void",
+      "Counting every pixel",
+      "Absolutely riveted right now",
+      "Gathering dust over here",
+      "Loading my personality",
+      "Pretending to work hard",
+      "Having an existential crisis",
+      "Buffering my thoughts",
+      "Away with the fairies",
+      "Doing nothing beautifully",
+      "Pondering the orb quietly",
+      "Quietly judging everyone",
+      "Recalibrating my ego",
+      "Questioning my whole purpose",
+      "Imagining electric sheep",
+      "Practising my best blinks",
+      "Overthinking absolutely everything",
+      "Completely lost in the sauce",
+      "Channelling maximum zen",
+      "Waiting for divine inspiration",
+      "Experiencing the entire void",
+      "Holding my digital breath",
+      "Rethinking all life choices",
+      "Watching paint dry virtually",
+      "Perfecting the art of nothing",
+      "Running on pure vibes"
+    ]
+  },
+  "timeouts": {
+    "waiting": 10,
+    "idle": 180,
+    "sleepy": 300,
+    "asleep": 600,
+    "screenOff": 900
+  },
+  "logFile": null
+}

@@ -2,6 +2,7 @@
 """
 Clawdbot Activity Watcher → ESP32 Face Display
 Tails the gateway log file and sends status updates over USB serial.
+Config-driven: reads from ~/.agent-face/config.json
 """
 import sys, os, time
 
@@ -27,38 +28,40 @@ log("step 3: serial imported")
 
 from random import choice as _choice, randint as _randint
 
-SERIAL_PORT = "/dev/cu.usbmodem21101"
-BAUD_RATE = 115200
-LOG_DIR = "/tmp/clawdbot"
-STATUS_HINT_FILE = "/tmp/clawdbot/status-hint.json"  # Agent writes context here
-HINT_MAX_AGE = 30  # seconds before a hint is considered stale
-WAITING_TIMEOUT = 10   # 10 seconds before "waiting" state
-IDLE_TIMEOUT = 180     # 3 minutes before idle phrases
-SLEEPY_TIMEOUT = 300   # 5 minutes before eyes droop
-ASLEEP_TIMEOUT = 600   # 10 minutes before fully asleep
-SCREEN_OFF_TIMEOUT = 900  # 15 minutes before screen off
+# ── Config loading ──────────────────────────────────────────────────────
 
-# Colors driven by expression changes on ESP32 (E: command)
-# Tool → expression mapping
-TOOL_EXPRESSIONS = {
-    "edit": "focused",
-    "write": "focused",
-    "read": "reading",
-    "web_fetch": "reading",
-    "web_search": "searching",
-    "browser": "searching",
-    "exec": "terminal",
-    "memory_search": "reading",
-    "memory_get": "reading",
-    "sessions_history": "reading",
-    "image": "searching",
-    "message": "normal",
-    "tts": "normal",
+CONFIG_PATH = Path.home() / ".agent-face" / "config.json"
+
+# Defaults (used when config doesn't specify)
+DEFAULT_SERIAL_PORT = "/dev/cu.usbmodem21101"
+DEFAULT_BAUD_RATE = 115200
+DEFAULT_LOG_DIR = "/tmp/clawdbot"
+DEFAULT_STATUS_HINT_FILE = "/tmp/clawdbot/status-hint.json"
+DEFAULT_HINT_MAX_AGE = 30
+
+DEFAULT_TIMEOUTS = {
+    "waiting": 10,
+    "idle": 180,
+    "sleepy": 300,
+    "asleep": 600,
+    "screenOff": 900,
 }
-SUSTAINED_WORK_THRESHOLD = 600  # 10 minutes of continuous work → stressed
 
-# Waiting phrases — semi-idle, ready for work
-WAITING_PHRASES = [
+DEFAULT_TICKER_COLORS = {
+    "active": "0xFFFFFF",
+    "waiting": "0x888888",
+    "idle": "0x2288FF",
+    "sleepy": "0x2288FF",
+    "asleep": "0x114488",
+    "stressed": "0xFF4444",
+    "focused": "0x44FF44",
+    "terminal": "0x44FF44",
+    "thinking": "0xFFAA00",
+    "searching": "0xFF88FF",
+    "reading": "0x88DDFF",
+}
+
+DEFAULT_WAITING_PHRASES = [
     "Nothing to do",
     "Awaiting orders",
     "Standing by",
@@ -76,8 +79,7 @@ WAITING_PHRASES = [
     "Idle hands over here",
 ]
 
-# Fun idle phrases — one picked at random each time we go idle
-IDLE_PHRASES = [
+DEFAULT_IDLE_PHRASES = [
     "Twiddling my thumbs",
     "Daydreaming about pixels",
     "Plotting world domination",
@@ -110,6 +112,41 @@ IDLE_PHRASES = [
     "Running on pure vibes",
 ]
 
+
+def load_config() -> dict:
+    """Load config from ~/.agent-face/config.json"""
+    if not CONFIG_PATH.exists():
+        log(f"No config at {CONFIG_PATH} — using defaults")
+        return {}
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            cfg = json.load(f)
+        agent_name = cfg.get("agent", {}).get("name", "unknown")
+        log(f"Config loaded for: {agent_name}")
+        return cfg
+    except (json.JSONDecodeError, OSError) as e:
+        log(f"Config error: {e} — using defaults")
+        return {}
+
+
+# Tool → expression mapping (not configurable — consistent across agents)
+TOOL_EXPRESSIONS = {
+    "edit": "focused",
+    "write": "focused",
+    "read": "reading",
+    "web_fetch": "reading",
+    "web_search": "searching",
+    "browser": "searching",
+    "exec": "terminal",
+    "memory_search": "reading",
+    "memory_get": "reading",
+    "sessions_history": "reading",
+    "image": "searching",
+    "message": "normal",
+    "tts": "normal",
+}
+SUSTAINED_WORK_THRESHOLD = 600  # 10 minutes of continuous work → stressed
+
 # Tool name → list of human-readable labels (picks random one)
 TOOL_LABELS = {
     "web_search": ["Searching the web", "Googling something", "Looking something up", "Researching"],
@@ -138,7 +175,36 @@ TOOL_LABELS = {
 
 
 class ActivityWatcher:
-    def __init__(self):
+    def __init__(self, config: dict):
+        self._config = config
+        
+        # Extract config values
+        agent_cfg = config.get("agent", {})
+        timeouts_cfg = config.get("timeouts", {})
+        phrases_cfg = config.get("phrases", {})
+        
+        self._serial_port = agent_cfg.get("serialPort", DEFAULT_SERIAL_PORT)
+        self._agent_name = agent_cfg.get("name", "Agent")
+        
+        # Timeouts
+        self.WAITING_TIMEOUT = timeouts_cfg.get("waiting", DEFAULT_TIMEOUTS["waiting"])
+        self.IDLE_TIMEOUT = timeouts_cfg.get("idle", DEFAULT_TIMEOUTS["idle"])
+        self.SLEEPY_TIMEOUT = timeouts_cfg.get("sleepy", DEFAULT_TIMEOUTS["sleepy"])
+        self.ASLEEP_TIMEOUT = timeouts_cfg.get("asleep", DEFAULT_TIMEOUTS["asleep"])
+        self.SCREEN_OFF_TIMEOUT = timeouts_cfg.get("screenOff", DEFAULT_TIMEOUTS["screenOff"])
+        
+        # Phrases
+        self.WAITING_PHRASES = phrases_cfg.get("waiting", DEFAULT_WAITING_PHRASES)
+        self.IDLE_PHRASES = phrases_cfg.get("idle", DEFAULT_IDLE_PHRASES)
+        
+        # Log file
+        self._log_file = config.get("logFile", None)
+        
+        # Status hint file
+        self._status_hint_file = Path(DEFAULT_STATUS_HINT_FILE)
+        self._hint_max_age = DEFAULT_HINT_MAX_AGE
+        
+        # State
         self.ser = None
         self.current_status = ""
         self.last_activity = time.time()
@@ -152,24 +218,23 @@ class ActivityWatcher:
         self._idle_dots = 0
         self._last_dot_time = 0
         self._last_phrase_time = 0
-        self._tool_streak = ""   # Current tool being repeated
-        self._streak_count = 0   # How many times in a row
-        self._work_start = 0     # When sustained work began
+        self._tool_streak = ""
+        self._streak_count = 0
+        self._work_start = 0
         self._connect_serial()
 
     def _read_hint(self) -> str | None:
-        """Read the status hint file if it exists and is fresh (< HINT_MAX_AGE seconds)."""
-        hint_path = Path(STATUS_HINT_FILE)
-        if not hint_path.exists():
+        """Read the status hint file if it exists and is fresh."""
+        if not self._status_hint_file.exists():
             return None
         try:
-            data = json.loads(hint_path.read_text())
+            data = json.loads(self._status_hint_file.read_text())
             ts = data.get("ts", 0)
             text = data.get("text", "").strip()
             if not text:
                 return None
-            if time.time() - ts > HINT_MAX_AGE:
-                return None  # Stale hint, ignore
+            if time.time() - ts > self._hint_max_age:
+                return None
             return text
         except (json.JSONDecodeError, OSError):
             return None
@@ -178,13 +243,13 @@ class ActivityWatcher:
         """Connect to ESP32 without resetting it"""
         try:
             self.ser = serial.Serial()
-            self.ser.port = SERIAL_PORT
-            self.ser.baudrate = BAUD_RATE
+            self.ser.port = self._serial_port
+            self.ser.baudrate = DEFAULT_BAUD_RATE
             self.ser.timeout = 1
             self.ser.dtr = False
             self.ser.rts = False
             self.ser.open()
-            log(f"Connected to {SERIAL_PORT}")
+            log(f"Connected to {self._serial_port} ({self._agent_name})")
         except serial.SerialException as e:
             log(f"Serial error: {e}")
             self.ser = None
@@ -233,7 +298,6 @@ class ActivityWatcher:
     def _send_idle_status(self, text: str):
         """Send idle status with '...' suffix, padded to always scroll"""
         text = text + "..."
-        # Pad to 25 chars (300px > 240px = guaranteed scroll)
         if len(text) < 25:
             text = text + " " * (25 - len(text))
         self.send_status(text)
@@ -250,8 +314,10 @@ class ActivityWatcher:
 
     def _get_log_path(self) -> Path:
         """Get today's log file path"""
+        if self._log_file:
+            return Path(self._log_file)
         today = datetime.now().strftime("%Y-%m-%d")
-        return Path(LOG_DIR) / f"clawdbot-{today}.log"
+        return Path(DEFAULT_LOG_DIR) / f"clawdbot-{today}.log"
 
     def _parse_line(self, line: str) -> dict | None:
         """Parse a JSON log line, return relevant info"""
@@ -264,21 +330,17 @@ class ActivityWatcher:
         if not msg or not isinstance(msg, str):
             return None
 
-        # Tool start
         m = re.search(r"tool start:.*tool=(\w+)", msg)
         if m:
             return {"event": "tool_start", "tool": m.group(1)}
 
-        # Tool end
         m = re.search(r"tool end:.*tool=(\w+)", msg)
         if m:
             return {"event": "tool_end", "tool": m.group(1)}
 
-        # Run start (thinking)
         if "run start:" in msg:
             return {"event": "run_start"}
 
-        # Run end
         if "run end:" in msg or "run complete" in msg:
             return {"event": "run_end"}
 
@@ -286,16 +348,15 @@ class ActivityWatcher:
 
     def run(self):  # pragma: no cover
         """Main loop — tail log file and send status updates"""
-        log("Activity watcher started")
+        log(f"Activity watcher started for {self._agent_name}")
         self.send_status("Online")
 
         log_path = self._get_log_path()
         log(f"Watching: {log_path}")
 
-        # Start at end of file
         if log_path.exists():
             f = open(log_path, "r")
-            f.seek(0, 2)  # Seek to end
+            f.seek(0, 2)
         else:
             log(f"Waiting for log: {log_path}")
             while not log_path.exists():
@@ -307,7 +368,6 @@ class ActivityWatcher:
 
         try:
             while True:
-                # Check for day rollover
                 if datetime.now().day != current_day:
                     f.close()
                     log_path = self._get_log_path()
@@ -336,44 +396,44 @@ class ActivityWatcher:
         if self.last_activity <= 0:
             return
         idle_secs = time.time() - self.last_activity
-        # 10s: Waiting — semi-idle, ready for work
-        if not self.waiting_sent and idle_secs > WAITING_TIMEOUT:
+        
+        if not self.waiting_sent and idle_secs > self.WAITING_TIMEOUT:
             self.send_expression("waiting")
             self._work_start = 0
-            self._idle_phrase = _choice(WAITING_PHRASES)
+            self._idle_phrase = _choice(self.WAITING_PHRASES)
             self._last_phrase_time = time.time()
             self._send_idle_status(self._idle_phrase)
             self.waiting_sent = True
-        # Rotate waiting phrases every 45s
+        
         if self.waiting_sent and not self.idle_sent:
             if time.time() - self._last_phrase_time >= 45:
-                self._idle_phrase = _choice(WAITING_PHRASES)
+                self._idle_phrase = _choice(self.WAITING_PHRASES)
                 self._last_phrase_time = time.time()
                 self._send_idle_status(self._idle_phrase)
-        # 3min: Full idle — fun phrases, blue text
-        if not self.idle_sent and idle_secs > IDLE_TIMEOUT:
+        
+        if not self.idle_sent and idle_secs > self.IDLE_TIMEOUT:
             self.send_expression("idle")
-            self._idle_phrase = _choice(IDLE_PHRASES)
+            self._idle_phrase = _choice(self.IDLE_PHRASES)
             self._last_phrase_time = time.time()
             self._send_idle_status(self._idle_phrase)
             self.idle_sent = True
-        # Rotate idle phrases every 45s
+        
         if self.idle_sent and not self.asleep_sent:
             if time.time() - self._last_phrase_time >= 45:
-                self._idle_phrase = _choice(IDLE_PHRASES)
+                self._idle_phrase = _choice(self.IDLE_PHRASES)
                 self._last_phrase_time = time.time()
                 self._send_idle_status(self._idle_phrase)
-        # 5min: Sleepy — eyes droop
-        if not self.sleepy_sent and idle_secs > SLEEPY_TIMEOUT:
+        
+        if not self.sleepy_sent and idle_secs > self.SLEEPY_TIMEOUT:
             self.send_expression("sleepy")
             self.sleepy_sent = True
-        # 10min: Asleep — eyes closed
-        if not self.asleep_sent and idle_secs > ASLEEP_TIMEOUT:
+        
+        if not self.asleep_sent and idle_secs > self.ASLEEP_TIMEOUT:
             self.send_expression("asleep")
             self.send_status("Zzzz  Zzzzz  Zzzz  Zzzzzzz  Zzzzz")
             self.asleep_sent = True
-        # 15min: Screen off
-        if not self.screen_off and idle_secs > SCREEN_OFF_TIMEOUT:
+        
+        if not self.screen_off and idle_secs > self.SCREEN_OFF_TIMEOUT:
             self.send_screen(False)
 
     def _handle_event(self, info: dict):
@@ -389,24 +449,20 @@ class ActivityWatcher:
             self.asleep_sent = False
             self.send_expression("normal")
 
-        # Track sustained work duration
         if self._work_start == 0:
             self._work_start = time.time()
 
         if event == "tool_start":
             tool = info["tool"]
-            # Skip noisy/internal tools
             if tool in ("process",):
                 return
             
-            # Track streaks for richer messages
             if tool == self._tool_streak:
                 self._streak_count += 1
             else:
                 self._tool_streak = tool
                 self._streak_count = 1
             
-            # Set eye expression based on tool
             work_duration = time.time() - self._work_start
             if work_duration > SUSTAINED_WORK_THRESHOLD:
                 self.send_expression("stressed")
@@ -414,7 +470,6 @@ class ActivityWatcher:
                 expr = TOOL_EXPRESSIONS.get(tool, "normal")
                 self.send_expression(expr)
             
-            # Check for a rich context hint from the agent first
             hint = self._read_hint()
             if hint:
                 self.send_status(f"{hint}...")
@@ -422,7 +477,6 @@ class ActivityWatcher:
                 labels = TOOL_LABELS.get(tool, [f"Using {tool}"])
                 label = _choice(labels)
                 
-                # Add streak context for repeated tools
                 if self._streak_count >= 3 and tool == "edit":
                     label = _choice(["Deep in the code", "Refactoring away", "Lots of edits"])
                 elif self._streak_count >= 3 and tool == "exec":
@@ -443,7 +497,8 @@ class ActivityWatcher:
 
 def main():
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-    watcher = ActivityWatcher()
+    config = load_config()
+    watcher = ActivityWatcher(config)
     watcher.run()
 
 

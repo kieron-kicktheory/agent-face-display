@@ -65,14 +65,10 @@ class StatusTicker:
         self._lo = c & 0xFF
     
     def set_color(self, color):
-        """Change color and re-render current text"""
+        """Change color — re-renders text buffer, visible on next scroll/window"""
         self._set_color(color)
-        if self._icon_data:
-            self._render_icon()
-            self._blit_icon()
         if self.text:
             self._prerender()
-            self._window()
     
     def set_icon(self, icon_data):
         """Set icon bitmap (24x24, 3 bytes/row) or None to clear"""
@@ -148,12 +144,9 @@ class StatusTicker:
         self._blit()
     
     def _blit(self):
-        """Blit text to display, then re-blit icon on top if present"""
+        """Blit text to display (full width)"""
         self.display.set_window(0, self.y, self.dw - 1, self.y + self.row_h - 1)
         self.display.write_data(self.disp_buf)
-        # Re-draw icon on top (it occupies the left 24px)
-        if self._icon_data is not None:
-            self._blit_icon()
     
     def set_text(self, text):
         self.text = text.strip()
@@ -234,20 +227,20 @@ class StatusTicker:
                             buf[idx + 1] = lo
     
     def _window(self):
-        """Copy visible window from pre-rendered buffer — fast row-slice copy"""
+        """Copy visible window from pre-rendered buffer — flicker-free row copy"""
         db = self.disp_buf
         fb = self._full_buf
         dw = self.dw
         fw = self._full_w
         rh = self.row_h
-        iw = self._icon_w  # Pixels reserved for icon (0 if no icon)
-        text_dw = dw - iw  # Available width for text
-        
-        # Clear display buffer
-        for i in range(len(db)):
-            db[i] = 0
+        iw = self._icon_w
+        text_dw = dw - iw
+        row_bytes = dw * 2  # full row in display buffer
+        z = b'\x00'  # for zeroing margins
         
         if fb is None:
+            for i in range(len(db)):
+                db[i] = 0
             self._blit()
             return
         
@@ -256,22 +249,34 @@ class StatusTicker:
         else:
             src_x = -(text_dw - fw) // 2
         
-        # Calculate visible overlap
         copy_start = max(0, src_x)
         copy_end = min(fw, src_x + text_dw)
         
         if copy_start >= copy_end:
+            for i in range(len(db)):
+                db[i] = 0
             self._blit()
             return
         
-        dst_offset = iw * 2 + (copy_start - src_x) * 2  # Offset past icon area
+        dst_offset = iw * 2 + (copy_start - src_x) * 2
         copy_bytes = (copy_end - copy_start) * 2
+        dst_end = dst_offset + copy_bytes
         
-        # Row-based slice copy
+        # Per-row: zero left margin, copy text, zero right margin — no full clear
         for row in range(rh):
+            rb = row * row_bytes
             si = row * fw * 2 + copy_start * 2
-            di = row * dw * 2 + dst_offset
+            di = rb + dst_offset
+            # Left margin (icon area + gap before text)
+            if dst_offset > 0:
+                db[rb:rb + dst_offset] = z * dst_offset
+            # Text pixels
             db[di:di + copy_bytes] = fb[si:si + copy_bytes]
+            # Right margin
+            re = rb + row_bytes
+            de = rb + dst_end
+            if de < re:
+                db[de:re] = z * (re - de)
         
         self._blit()
     

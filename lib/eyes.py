@@ -1,6 +1,7 @@
 """
 Animated Eyes for ESP32-S3-LCD-1.69
 Pre-rendered buffer blit, non-blocking blink, expressions
+Config-driven: all visual properties loaded from config dict
 """
 import time
 import gc
@@ -10,8 +11,18 @@ from random import randint
 BLACK = 0x000000
 WHITE = 0xFFFFFF
 EYE_WHITE = 0xFFFFFF
-IRIS_COLOR = 0x2288FF
 PUPIL_COLOR = 0x000000
+
+# Default iris if no config
+DEFAULT_IRIS = 0x2288FF
+
+def _parse_hex(s):
+    """Parse '0x2288FF' or '0xFF4444' string to int"""
+    if isinstance(s, int):
+        return s
+    if isinstance(s, str):
+        return int(s, 16)
+    return DEFAULT_IRIS
 
 def _to565(color):
     r, g, b = (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF
@@ -35,21 +46,51 @@ EXPR_SEARCHING = 5  # Web search — pupils dart around quickly
 EXPR_THINKING = 6   # LLM thinking — pupils look up
 EXPR_TERMINAL = 7   # Running commands — slight squint, fixed center
 EXPR_STRESSED = 8   # Long sustained work — wider eyes, faster blinks
+EXPR_HAPPY = 9      # Default happy (for Bobby-style faces)
 
 
 class Eyes:
-    def __init__(self, display):
+    def __init__(self, display, config=None):
         self.display = display
         self.width = display.width
         self.height = display.height
         
-        # Eye parameters
-        self.eye_width = 70
-        self.eye_height = 80
-        self.eye_spacing = 20
-        self.corner_radius = 15
-        self.pupil_size = 20
-        self.iris_size = 40
+        # Load config (or use defaults)
+        cfg = config or {}
+        
+        # Eye parameters — all configurable
+        self.eye_width = cfg.get("eyeWidth", 70)
+        self.eye_height = cfg.get("eyeHeight", 80)
+        self.eye_spacing = cfg.get("eyeSpacing", 20)
+        self.corner_radius = cfg.get("cornerRadius", 15)
+        self.pupil_size = cfg.get("pupilSize", 20)
+        self.iris_size = cfg.get("irisSize", 40)
+        
+        # Colors
+        iris_color = _parse_hex(cfg.get("irisColor", DEFAULT_IRIS))
+        
+        # Eyebrow config
+        brow_cfg = cfg.get("eyebrows", None)
+        self._has_eyebrows = brow_cfg is not None
+        if self._has_eyebrows:
+            self._brow_thickness = brow_cfg.get("thickness", 3)
+            self._brow_gap = brow_cfg.get("gap", 4)
+            self._brow_color = _parse_hex(brow_cfg.get("color", "0xFFFFFF"))
+            self._c_brow = _to565(self._brow_color)
+        
+        # Crow's feet
+        self._has_crows_feet = cfg.get("crowsFeet", False)
+        
+        # Happy squint (default eyelid droop for happy expression)
+        self._happy_squint = cfg.get("happySquint", 0)
+        
+        # Default expression
+        default_expr = cfg.get("defaultExpression", "normal")
+        
+        # Blink interval range
+        blink_cfg = cfg.get("blinkInterval", [3000, 6000])
+        self._blink_min = blink_cfg[0]
+        self._blink_max = blink_cfg[1]
         
         # Eye center positions
         self.left_eye_x = self.width // 2 - self.eye_width // 2 - self.eye_spacing // 2
@@ -71,7 +112,7 @@ class Eyes:
         
         # Pre-compute colors
         self._c_white = _to565(EYE_WHITE)
-        self._c_iris = _to565(IRIS_COLOR)
+        self._c_iris = _to565(iris_color)
         self._c_pupil = _to565(PUPIL_COLOR)
         self._c_highlight = _to565(WHITE)
         self._c_black = _to565(BLACK)
@@ -91,7 +132,7 @@ class Eyes:
         
         # Blink timer
         self.last_blink = time.ticks_ms()
-        self.next_blink = randint(3000, 6000)
+        self.next_blink = randint(self._blink_min, self._blink_max)
         
         # Idle movement
         self.idle_mode = True
@@ -121,6 +162,54 @@ class Eyes:
         # Initialize display
         self.display.fill(BLACK)
         self._blit_both()
+        
+        # Draw eyebrows on init
+        if self._has_eyebrows:
+            self._draw_eyebrows()
+        
+        # Draw crow's feet on init
+        if self._has_crows_feet:
+            self._draw_crows_feet()
+        
+        # Set default expression
+        if default_expr == "happy" and self._happy_squint > 0:
+            self.expression = EXPR_HAPPY
+            self._target_lid = self._happy_squint
+            self._eyelid_pct = self._happy_squint
+            self._apply_eyelid()
+            self._blit_both()
+    
+    def _draw_eyebrows(self):
+        """Draw eyebrows above each eye"""
+        ew = self.eye_width
+        thick = self._brow_thickness
+        gap = self._brow_gap
+        color = self._brow_color
+        
+        # Position: above each eye, with gap
+        brow_y = self._top - gap - thick
+        
+        # Left eyebrow — slightly angled (inner edge higher)
+        self.display.fill_rect(self._lx + 2, brow_y, ew - 4, thick, color)
+        # Right eyebrow
+        self.display.fill_rect(self._rx + 2, brow_y, ew - 4, thick, color)
+    
+    def _draw_crows_feet(self):
+        """Draw crow's feet (smile lines) at outer corners of eyes"""
+        eh = self.eye_height
+        color = 0x888888  # Subtle grey
+        
+        # Outer corner positions
+        left_outer_x = self._lx - 3
+        right_outer_x = self._rx + self.eye_width + 1
+        feet_y = self.eye_y + eh // 4  # Lower quarter of eye
+        
+        # 2-3 pixel diagonal lines at outer corners
+        for i in range(3):
+            # Left eye — outer left
+            self.display.fill_rect(left_outer_x - i, feet_y + i * 2, 2, 1, color)
+            # Right eye — outer right
+            self.display.fill_rect(right_outer_x + i, feet_y + i * 2, 2, 1, color)
     
     def set_expression(self, expr):
         """Set expression based on activity"""
@@ -135,56 +224,63 @@ class Eyes:
             self._lid_speed = 1
             self.look_at(0, 1.0)
         elif expr == 'focused':
-            # Coding/editing — squinted, looking straight ahead
             self.expression = EXPR_FOCUSED
-            self._target_lid = 25     # Slight squint from top
+            self._target_lid = 25
             self._lid_speed = 2
-            self.look_at(0, 0.1)      # Slightly down, focused
-            self.next_blink = randint(5000, 10000)  # Blink less when focused
+            self.look_at(0, 0.1)
+            self.next_blink = randint(5000, 10000)
         elif expr == 'reading':
-            # Reading — eyes track left to right
             self.expression = EXPR_READING
-            self._target_lid = 10     # Slightly narrowed
+            self._target_lid = 10
             self._lid_speed = 2
-            self._read_pos = -10      # Start from left
+            self._read_pos = -10
             self._read_dir = 1
             self._last_read = time.ticks_ms()
         elif expr == 'searching':
-            # Searching — pupils dart around curiously
             self.expression = EXPR_SEARCHING
-            self._target_lid = 0      # Wide open, curious
+            self._target_lid = 0
             self._lid_speed = 3
             self._last_search = time.ticks_ms()
-            self.next_blink = randint(2000, 4000)  # Normal blinking
+            self.next_blink = randint(2000, 4000)
         elif expr == 'thinking':
-            # Thinking — look up and to the side
             self.expression = EXPR_THINKING
             self._target_lid = 0
             self._lid_speed = 2
-            self.look_at(0.3, -0.8)   # Up and slightly right
-            self.next_blink = randint(4000, 8000)  # Thoughtful, less blinking
+            self.look_at(0.3, -0.8)
+            self.next_blink = randint(4000, 8000)
         elif expr == 'terminal':
-            # Running commands — slight squint, fixed stare
             self.expression = EXPR_TERMINAL
-            self._target_lid = 20     # Slight squint
+            self._target_lid = 20
             self._lid_speed = 2
-            self.look_at(0, 0)        # Dead center
-            self.next_blink = randint(6000, 12000)  # Barely blinks
+            self.look_at(0, 0)
+            self.next_blink = randint(6000, 12000)
         elif expr == 'stressed':
-            # Long work session — wider eyes, faster blinks
             self.expression = EXPR_STRESSED
-            self._target_lid = 0      # Eyes wide
-            self._lid_speed = 3
-            self.next_blink = randint(1500, 3000)  # Blinks a lot
-        elif expr == 'done':
-            # Task complete — normal eyes, slight look down (satisfied)
-            self.expression = EXPR_NORMAL
             self._target_lid = 0
+            self._lid_speed = 3
+            self.next_blink = randint(1500, 3000)
+        elif expr == 'done':
+            # Return to default expression
+            if self._happy_squint > 0:
+                self.expression = EXPR_HAPPY
+                self._target_lid = self._happy_squint
+            else:
+                self.expression = EXPR_NORMAL
+                self._target_lid = 0
             self._lid_speed = 3
             self.look_at(0, 0.2)
+        elif expr == 'happy':
+            self.expression = EXPR_HAPPY
+            self._target_lid = self._happy_squint
+            self._lid_speed = 2
         else:
-            self.expression = EXPR_NORMAL
-            self._target_lid = 0
+            # Normal — respect happy squint if configured as default
+            if self._happy_squint > 0:
+                self.expression = EXPR_HAPPY
+                self._target_lid = self._happy_squint
+            else:
+                self.expression = EXPR_NORMAL
+                self._target_lid = 0
             self._lid_speed = 3
     
     def _build_corner_mask(self):
@@ -284,13 +380,18 @@ class Eyes:
         self._blit_eye(self.right_eye_x, self.eye_y)
         self.prev_offset_x = self.pupil_offset_x
         self.prev_offset_y = self.pupil_offset_y
+        
+        # Redraw eyebrows and crow's feet (they get overwritten by fill_rect in blink)
+        if self._has_eyebrows:
+            self._draw_eyebrows()
+        if self._has_crows_feet:
+            self._draw_crows_feet()
     
     def _draw_eyelids(self, step):
         """Draw blink eyelids at step (1-3) — additive black on both eyes"""
         ew = self.eye_width
         lid = (self._half * step) // 3
         cy = self.eye_y
-        # Top eyelids (both eyes together, then bottom together)
         self.display.fill_rect(self._lx, self._top, ew, lid, BLACK)
         self.display.fill_rect(self._rx, self._top, ew, lid, BLACK)
         self.display.fill_rect(self._lx, cy + self._half - lid, ew, lid, BLACK)
@@ -300,7 +401,6 @@ class Eyes:
         """Draw closed-eye line at the bottom of the eye area"""
         ew = self.eye_width
         eh = self.eye_height
-        # Bottom of eye area (where the eyelid finishes closing)
         bottom_y = self.eye_y + eh // 2 - 4
         self.display.fill_rect(self._lx, bottom_y, ew, 4, EYE_WHITE)
         self.display.fill_rect(self._rx, bottom_y, ew, 4, EYE_WHITE)
@@ -341,14 +441,16 @@ class Eyes:
         
         elif self._blink_state == _CLOSED:
             if elapsed >= 60:
-                # Eyes open — buffer already has eyelid baked in
                 self._blit_both()
                 self._blink_state = _IDLE
                 self.last_blink = time.ticks_ms()
                 if self.expression == EXPR_SLEEPY:
                     self.next_blink = randint(6000, 12000)
+                elif self.expression == EXPR_HAPPY:
+                    # Happy faces blink a bit slower — relaxed
+                    self.next_blink = randint(self._blink_min, self._blink_max)
                 else:
-                    self.next_blink = randint(3000, 6000)
+                    self.next_blink = randint(self._blink_min, self._blink_max)
         
         return self._blink_state != _IDLE
     
@@ -362,11 +464,9 @@ class Eyes:
         else:
             self._eyelid_pct = max(self._eyelid_pct - self._lid_speed, self._target_lid)
         
-        # Apply eyelid to cached base buffer (cheap — no pixel loops)
         self._apply_eyelid()
         self._blit_both()
         
-        # When fully closed, draw the sleeping line
         if self._eyelid_pct >= 100:
             gc.collect()
             self._draw_closed_line()
@@ -389,7 +489,7 @@ class Eyes:
     
     def look_at(self, x, y):
         max_x = 12
-        max_y = 20  # More vertical range for looking up/down
+        max_y = 20
         self.pupil_offset_x = int(x * max_x)
         self.pupil_offset_y = int(y * max_y)
     
@@ -403,7 +503,6 @@ class Eyes:
         if self._update_blink():
             return
         
-        # Smooth eyelid transitions
         if self._update_eyelid():
             return
         
@@ -428,7 +527,6 @@ class Eyes:
         elif self.expression == EXPR_STRESSED:
             self._update_stressed(now)
         elif self.expression == EXPR_FOCUSED or self.expression == EXPR_TERMINAL:
-            # Focused: slow deliberate scanning, like reading code
             if time.ticks_diff(now, self.last_move) > 1500:
                 x = randint(-6, 6) / 10
                 y = randint(-2, 3) / 10
@@ -439,6 +537,14 @@ class Eyes:
                 x = randint(-2, 2) / 10
                 self.look_at(x, 1.0)
                 self.next_move = randint(4000, 8000)
+                self.last_move = now
+        elif self.expression == EXPR_HAPPY:
+            # Happy — gentle, warm idle movements
+            if time.ticks_diff(now, self.last_move) > self.next_move:
+                x = randint(-6, 6) / 10
+                y = randint(-3, 3) / 10
+                self.look_at(x, y)
+                self.next_move = randint(3000, 6000)
                 self.last_move = now
         elif self.idle_mode:
             if time.ticks_diff(now, self.last_move) > self.next_move:
@@ -456,14 +562,12 @@ class Eyes:
         
         self._read_pos += self._read_dir * 2
         
-        # At end of line, pause briefly then sweep back
         if self._read_pos >= 10:
             self._read_dir = -1
-            self._read_speed = 80    # Quick snap back (saccade)
+            self._read_speed = 80
         elif self._read_pos <= -10:
             self._read_dir = 1
-            self._read_speed = 200   # Slow read left-to-right
-            # Small downward shift each "line"
+            self._read_speed = 200
         
         self.look_at(self._read_pos / 10, 0.1)
     
@@ -473,35 +577,30 @@ class Eyes:
             return
         self._last_search = now
         
-        # Quick dart to a new position
         self._search_target_x = randint(-8, 8) / 10
         self._search_target_y = randint(-4, 4) / 10
         self.look_at(self._search_target_x, self._search_target_y)
-        
-        # Vary timing — sometimes quick darts, sometimes a pause
         self._search_speed = randint(200, 600)
     
     def _update_thinking(self, now):
         """Thinking animation — eyes drift up-right, occasional slow movement"""
         if time.ticks_diff(now, self.last_move) > 3000:
-            # Gentle drift while thinking — mostly looking up
             x = randint(1, 5) / 10
-            y = randint(-10, -5) / 10  # Always looking up
+            y = randint(-10, -5) / 10
             self.look_at(x, y)
             self.last_move = now
     
     def _update_stressed(self, now):
         """Stressed animation — slightly erratic movement, wider eyes"""
         if time.ticks_diff(now, self.last_move) > 1500:
-            # Quick, slightly jittery movements
             x = randint(-6, 6) / 10
             y = randint(-3, 3) / 10
             self.look_at(x, y)
             self.last_move = now
 
 
-def run(display):
-    eyes = Eyes(display)
+def run(display, config=None):
+    eyes = Eyes(display, config)
     print("Eyes running... Ctrl+C to stop")
     try:
         while True:
