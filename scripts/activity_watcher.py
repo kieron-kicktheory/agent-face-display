@@ -221,6 +221,8 @@ class ActivityWatcher:
         self._tool_streak = ""
         self._streak_count = 0
         self._work_start = 0
+        self._last_serial_check = 0
+        self._serial_check_interval = 30  # Check serial health every 30s
         self._connect_serial()
 
     def _read_hint(self) -> str | None:
@@ -241,6 +243,14 @@ class ActivityWatcher:
 
     def _connect_serial(self):
         """Connect to ESP32 without resetting it"""
+        # Close existing connection cleanly
+        if self.ser:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+        
         try:
             self.ser = serial.Serial()
             self.ser.port = self._serial_port
@@ -253,6 +263,24 @@ class ActivityWatcher:
         except serial.SerialException as e:
             log(f"Serial error: {e}")
             self.ser = None
+    
+    def _check_serial_health(self):
+        """Verify serial port is still responsive — reconnect if not"""
+        if not self.ser:
+            self._connect_serial()
+            return
+        try:
+            if not self.ser.is_open:
+                log("Serial port closed, reconnecting...")
+                self._connect_serial()
+                return
+            # Check the port still exists on the system
+            if not Path(self._serial_port).exists():
+                log(f"Serial port {self._serial_port} disappeared, reconnecting...")
+                self._connect_serial()
+        except (serial.SerialException, OSError):
+            log("Serial health check failed, reconnecting...")
+            self._connect_serial()
 
     def send_status(self, text: str):
         """Send status to ESP32"""
@@ -383,6 +411,11 @@ class ActivityWatcher:
                         self._handle_event(info)
                 else:
                     self._check_idle()
+                    # Periodic serial health check
+                    now = time.time()
+                    if now - self._last_serial_check > self._serial_check_interval:
+                        self._check_serial_health()
+                        self._last_serial_check = now
                     time.sleep(0.1)
 
         except KeyboardInterrupt:
@@ -442,12 +475,18 @@ class ActivityWatcher:
         self.last_activity = time.time()
         self.waiting_sent = False
         self.idle_sent = False
+        
+        # Wake from sleep — screen on first, then expression
+        was_sleeping = self.sleepy_sent or self.asleep_sent
         if self.screen_off:
             self.send_screen(True)
-        if self.sleepy_sent or self.asleep_sent:
+        if was_sleeping:
             self.sleepy_sent = False
             self.asleep_sent = False
+            # Force expression reset by clearing current_expr so dedup doesn't skip it
+            self.current_expr = ""
             self.send_expression("normal")
+            log(f"  ⏰ Woke from sleep")
 
         if self._work_start == 0:
             self._work_start = time.time()
