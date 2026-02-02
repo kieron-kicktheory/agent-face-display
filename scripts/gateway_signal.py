@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 Gateway Activity Signal Writer
-Monitors the Clawdbot gateway process for activity (CPU usage, network connections,
-log file changes) and writes the agent-status signal file for the face watcher.
+Monitors the Clawdbot gateway process for activity and writes the
+agent-status signal file for the face watcher to consume.
 
-This bridges the gap between gateway activity and face display state — the gateway
-doesn't log most agent activity (tool calls, responses), so the watcher needs
-another signal source.
+Two detection methods run together:
+1. Log tailing — reads new lines from stdout + stderr logs in real-time
+   for specific tool/activity detection (gives detailed state info)
+2. CPU polling — checks gateway process CPU usage every few seconds
+   as a safety net (catches activity with no log output)
 
 Runs as a launchd daemon alongside the face watcher.
 """
@@ -28,33 +30,36 @@ STATUS_DIR = "/tmp/clawdbot"
 STATUS_FILE = f"{STATUS_DIR}/agent-status.json"
 LOG_FILE = f"{STATUS_DIR}/gateway-signal-debug.log"
 LOG_DIR = "/tmp/clawdbot"
-ERR_LOG = str(Path.home() / ".clawdbot/logs/gateway.err.log")
+ERR_LOG_PATH = Path.home() / ".clawdbot/logs/gateway.err.log"
 
-POLL_INTERVAL = 2.0        # seconds between checks
-CPU_ACTIVE_THRESHOLD = 0.5 # % CPU above this = active
-IDLE_AFTER = 15            # seconds of no activity before writing idle
-STALE_SIGNAL_AGE = 25      # write signal if older than this (keep it fresh while active)
+CPU_POLL_INTERVAL = 3.0     # seconds between CPU checks
+CPU_ACTIVE_THRESHOLD = 0.5  # % CPU above this = active
+IDLE_AFTER = 15             # seconds of no activity before removing signal
+STALE_SIGNAL_AGE = 25       # refresh signal if older than this while active
+LOOP_SLEEP = 0.15           # main loop sleep (fast enough to tail logs)
 
-# State → detail mapping for signal file
-STATE_DETAILS = {
-    "web_search": ("searching", "Searching the web"),
-    "web_fetch": ("reading", "Reading a webpage"),
-    "message": ("composing", "Writing on Discord"),
-    "chat.send": ("composing", "Sending a reply"),
-    "chat.reply": ("composing", "Sending a reply"),
-    "exec": ("executing", "Running a command"),
-    "read": ("reading", "Reading a file"),
-    "write": ("coding", "Writing a file"),
-    "edit": ("coding", "Editing a file"),
-    "memory_search": ("searching", "Searching memory"),
-    "memory_get": ("reading", "Reading memory"),
-    "browser": ("searching", "Using the browser"),
-    "cron": ("thinking", "Managing cron jobs"),
-    "sessions_spawn": ("thinking", "Spawning a sub-agent"),
-    "image": ("thinking", "Analysing an image"),
-    "discord": ("composing", "Working in Discord"),
-    "Slow listener": ("thinking", "Processing a response"),
-}
+# Log line → (state, detail) mapping
+# Checked in order — put most specific patterns first
+ACTIVITY_PATTERNS = [
+    ("web_search", "searching", "Searching the web"),
+    ("web_fetch", "reading", "Reading a webpage"),
+    ("[tools] message", "composing", "Writing on Discord"),
+    ("chat.send", "composing", "Sending a reply"),
+    ("chat.reply", "composing", "Sending a reply"),
+    ("[tools] exec", "executing", "Running a command"),
+    ("[tools] read", "reading", "Reading a file"),
+    ("[tools] write", "coding", "Writing a file"),
+    ("[tools] edit", "coding", "Editing a file"),
+    ("memory_search", "searching", "Searching memory"),
+    ("memory_get", "reading", "Reading memory"),
+    ("[tools] browser", "searching", "Using the browser"),
+    ("[tools] cron", "thinking", "Managing schedules"),
+    ("sessions_spawn", "thinking", "Spawning a sub-agent"),
+    ("[tools] image", "thinking", "Analysing an image"),
+    ("Slow listener.*Discord", "thinking", "Processing a response"),
+    ("DiscordMessageListener", "thinking", "Reading a message"),
+    ("discord-auto-reply", "thinking", "Deciding on a reply"),
+]
 
 
 def log(msg):
@@ -64,7 +69,6 @@ def log(msg):
 
 
 def load_config():
-    """Load agent name from config"""
     agent_name = "unknown"
     if CONFIG_PATH.exists():
         try:
@@ -77,7 +81,6 @@ def load_config():
 
 
 def find_gateway_pid():
-    """Find the clawdbot-gateway process PID"""
     try:
         result = subprocess.run(
             ["ps", "aux"], capture_output=True, text=True, timeout=5
@@ -91,7 +94,6 @@ def find_gateway_pid():
 
 
 def get_cpu_usage(pid):
-    """Get CPU % for a process"""
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "%cpu="],
@@ -102,97 +104,21 @@ def get_cpu_usage(pid):
         return 0.0
 
 
-def get_log_mtime():
-    """Get the most recent modification time across gateway logs"""
-    latest = 0
+def get_dated_log_path():
     today = datetime.now().strftime("%Y-%m-%d")
-    paths = [
-        f"{LOG_DIR}/clawdbot-{today}.log",
-        ERR_LOG,
-    ]
-    for p in paths:
-        try:
-            mt = os.path.getmtime(p)
-            if mt > latest:
-                latest = mt
-        except OSError:
-            pass
-    return latest
+    return f"{LOG_DIR}/clawdbot-{today}.log"
 
 
-def get_active_connections(pid):
-    """Count active network connections (API calls to Anthropic etc.)"""
-    try:
-        result = subprocess.run(
-            ["lsof", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED", "-Fn"],
-            capture_output=True, text=True, timeout=5
-        )
-        return result.stdout.count("\nn")
-    except Exception:
-        return 0
-
-
-def detect_activity_detail(log_dir, err_log):
-    """Read recent log entries to determine what the agent is currently doing.
-    Returns (state, detail) tuple."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    log_path = f"{log_dir}/clawdbot-{today}.log"
-
-    # Check both logs, most recent entries first
-    recent_lines = []
-
-    # Read last few lines of stderr (has tool info)
-    try:
-        with open(err_log, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 4096))
-            tail = f.read().decode("utf-8", errors="replace")
-            recent_lines.extend(tail.strip().splitlines()[-5:])
-    except OSError:
-        pass
-
-    # Read last few lines of dated log
-    try:
-        with open(log_path, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 4096))
-            tail = f.read().decode("utf-8", errors="replace")
-            recent_lines.extend(tail.strip().splitlines()[-5:])
-    except OSError:
-        pass
-
-    # Filter to entries from the last 30 seconds
-    now = time.time()
-    fresh_lines = []
-    for line in recent_lines:
-        # Try to extract timestamp
-        m = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", line)
-        if m:
-            try:
-                from datetime import timezone
-                ts_str = m.group(1)
-                dt = datetime.fromisoformat(ts_str + "+00:00")
-                age = now - dt.timestamp()
-                if age < 30:
-                    fresh_lines.append(line)
-            except Exception:
-                fresh_lines.append(line)  # Include if can't parse
-        else:
-            fresh_lines.append(line)
-
-    # Search fresh lines for activity indicators (check most specific first)
-    combined = " ".join(fresh_lines)
-    for keyword, (state, detail) in STATE_DETAILS.items():
-        if keyword in combined:
+def match_activity(line):
+    """Match a log line against known activity patterns.
+    Returns (state, detail) or None."""
+    for pattern, state, detail in ACTIVITY_PATTERNS:
+        if pattern in line:
             return state, detail
-
-    return "thinking", "Working"
+    return None
 
 
 def write_signal(agent_name, state, detail=""):
-    """Write the agent status signal file atomically"""
     os.makedirs(STATUS_DIR, exist_ok=True)
     ts = int(time.time())
     data = {"agent": agent_name, "state": state, "detail": detail, "ts": ts}
@@ -203,79 +129,139 @@ def write_signal(agent_name, state, detail=""):
 
 
 def remove_signal():
-    """Remove signal file to let the watcher handle idle on its own"""
     try:
         os.remove(STATUS_FILE)
     except OSError:
         pass
 
 
+def open_tail(path):
+    """Open a file for tailing (seek to end). Returns file handle or None."""
+    p = Path(path)
+    if p.exists():
+        f = open(p, "r")
+        f.seek(0, 2)
+        return f
+    return None
+
+
 def main():
     agent_name = load_config()
     log(f"Gateway signal writer started for {agent_name}")
 
+    # State tracking
     last_active_time = 0
-    last_log_mtime = get_log_mtime()
     was_active = False
     last_write_time = 0
     last_state = ""
+    last_detail = ""
+    last_cpu_check = 0
+    current_day = datetime.now().day
+
+    # Open log files for tailing
+    stdout_log = open_tail(get_dated_log_path())
+    stderr_log = open_tail(str(ERR_LOG_PATH))
+
+    if stdout_log:
+        log(f"Tailing stdout: {get_dated_log_path()}")
+    if stderr_log:
+        log(f"Tailing stderr: {ERR_LOG_PATH}")
 
     while True:
         try:
-            pid = find_gateway_pid()
-            if not pid:
-                if was_active:
-                    log("Gateway process not found — removing signal")
-                    remove_signal()
-                    was_active = False
-                time.sleep(POLL_INTERVAL * 5)
-                continue
-
-            # Check multiple activity indicators
-            cpu = get_cpu_usage(pid)
-            log_mtime = get_log_mtime()
-            log_changed = log_mtime > last_log_mtime
-            last_log_mtime = log_mtime
-
-            # Consider active if CPU is above threshold or log just changed
-            is_active = cpu > CPU_ACTIVE_THRESHOLD or log_changed
-
             now = time.time()
+
+            # ── Day rollover: re-open dated log ──
+            if datetime.now().day != current_day:
+                if stdout_log:
+                    stdout_log.close()
+                stdout_log = None
+                current_day = datetime.now().day
+                new_path = get_dated_log_path()
+                # Wait briefly for new log to appear
+                for _ in range(10):
+                    if Path(new_path).exists():
+                        stdout_log = open_tail(new_path)
+                        log(f"Day rollover — now tailing: {new_path}")
+                        break
+                    time.sleep(1)
+
+            # ── Tail log files for specific activity ──
+            log_activity = None
+
+            if stdout_log:
+                line = stdout_log.readline()
+                if line:
+                    match = match_activity(line)
+                    if match:
+                        log_activity = match
+
+            if stderr_log:
+                err_line = stderr_log.readline()
+                if err_line:
+                    match = match_activity(err_line)
+                    if match:
+                        log_activity = match
+            else:
+                # Try to open stderr if it wasn't available at start
+                if ERR_LOG_PATH.exists():
+                    stderr_log = open_tail(str(ERR_LOG_PATH))
+
+            # ── CPU check (safety net, runs every CPU_POLL_INTERVAL) ──
+            cpu_active = False
+            if now - last_cpu_check >= CPU_POLL_INTERVAL:
+                last_cpu_check = now
+                pid = find_gateway_pid()
+                if pid:
+                    cpu = get_cpu_usage(pid)
+                    cpu_active = cpu > CPU_ACTIVE_THRESHOLD
+
+            # ── Determine if active ──
+            is_active = log_activity is not None or cpu_active
 
             if is_active:
                 last_active_time = now
-                # Detect what the agent is actually doing
-                state, detail = detect_activity_detail(LOG_DIR, ERR_LOG)
-                # Only write signal if state changed or signal is getting stale
-                if not was_active or (now - last_write_time > STALE_SIGNAL_AGE) or state != last_state:
+
+                # Use log-detected detail if available, otherwise generic
+                if log_activity:
+                    state, detail = log_activity
+                else:
+                    state, detail = "thinking", "Working"
+
+                # Write signal if state changed, or signal getting stale
+                state_changed = (state != last_state or detail != last_detail)
+                signal_stale = (now - last_write_time > STALE_SIGNAL_AGE)
+
+                if not was_active or state_changed or signal_stale:
                     if not was_active:
-                        log(f"  ⚡ Active (CPU: {cpu:.1f}%, log_changed: {log_changed})")
-                    log(f"  → {state}: {detail}")
+                        log(f"  ⚡ Active")
+                    if state_changed:
+                        log(f"  → {state}: {detail}")
                     write_signal(agent_name, state, detail)
                     last_write_time = now
                     last_state = state
+                    last_detail = detail
+
                 was_active = True
 
             elif was_active:
-                # Was active, now idle — keep signal fresh for a bit then remove
+                # Grace period before going idle
                 idle_secs = now - last_active_time
                 if idle_secs > IDLE_AFTER:
-                    if was_active:
-                        log(f"  💤 Idle after {idle_secs:.0f}s")
+                    log(f"  💤 Idle after {idle_secs:.0f}s")
                     remove_signal()
                     was_active = False
                     last_state = ""
+                    last_detail = ""
                 elif now - last_write_time > STALE_SIGNAL_AGE:
-                    # Still in grace period, keep signal fresh
-                    state, detail = detect_activity_detail(LOG_DIR, ERR_LOG)
-                    write_signal(agent_name, state, detail)
+                    # Keep signal fresh during grace period
+                    write_signal(agent_name, last_state, last_detail)
                     last_write_time = now
-                    last_state = state
 
         except Exception as e:
             log(f"Error: {e}")
 
-        time.sleep(POLL_INTERVAL)
+        time.sleep(LOOP_SLEEP)
 
 
 if __name__ == "__main__":
