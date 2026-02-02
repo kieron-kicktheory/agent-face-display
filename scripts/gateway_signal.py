@@ -56,9 +56,9 @@ ACTIVITY_PATTERNS = [
     ("[tools] cron", "thinking", "Managing schedules"),
     ("sessions_spawn", "thinking", "Spawning a sub-agent"),
     ("[tools] image", "thinking", "Analysing an image"),
-    ("Slow listener.*Discord", "thinking", "Processing a response"),
-    ("DiscordMessageListener", "thinking", "Reading a message"),
-    ("discord-auto-reply", "thinking", "Deciding on a reply"),
+    ("Slow listener.*Discord", "composing", "Processing a response"),
+    ("DiscordMessageListener", "composing", "Replying on Discord"),
+    ("discord-auto-reply", "reading", "Reading Discord"),
 ]
 
 
@@ -227,6 +227,27 @@ def main():
                     state, detail = log_activity
                 else:
                     state, detail = "thinking", "Working"
+
+                # Check if someone else wrote a more specific signal recently
+                # (e.g. write_status.sh called directly) — don't overwrite it
+                try:
+                    if Path(STATUS_FILE).exists():
+                        existing = json.loads(Path(STATUS_FILE).read_text())
+                        ext_ts = existing.get("ts", 0)
+                        ext_age = now - ext_ts
+                        ext_detail = existing.get("detail", "")
+                        # If external signal is fresh (<STALE_SIGNAL_AGE) and more
+                        # specific than "Working", don't overwrite it
+                        if (ext_age < STALE_SIGNAL_AGE
+                                and ext_detail != "Working"
+                                and ext_detail != ""
+                                and state == "thinking"
+                                and detail == "Working"):
+                            # Respect the more specific external signal
+                            was_active = True
+                            continue
+                except Exception:
+                    pass
 
                 # Write signal if state changed, or signal getting stale
                 state_changed = (state != last_state or detail != last_detail)
