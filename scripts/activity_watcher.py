@@ -216,6 +216,9 @@ class ActivityWatcher:
         self._log_file = config.get("logFile", None)
         self._log_dir = config.get("logDir", DEFAULT_LOG_DIR)
         self._log_prefix = config.get("logPrefix", "clawdbot")
+        # Stderr log (gateway.err.log has tool activity not in main log)
+        self._err_log_dir = config.get("errLogDir", os.path.expanduser("~/.clawdbot/logs"))
+        self._err_log_file = config.get("errLogFile", "gateway.err.log")
         
         # Status hint file
         self._status_hint_file = Path(DEFAULT_STATUS_HINT_FILE)
@@ -497,6 +500,10 @@ class ActivityWatcher:
                 return {"event": "heartbeat"}
             return {"event": "run_start"}
 
+        # ── Websocket chat activity = agent is actively responding ──
+        if "chat.send" in combined or "chat.reply" in combined:
+            return {"event": "run_start"}
+
         # ── Non-discord tool/run activity keeps the face awake ──
         level = data.get("_meta", {}).get("logLevelName", "")
         if level in ("INFO", "WARN", "ERROR", "DEBUG"):
@@ -507,6 +514,26 @@ class ActivityWatcher:
             return {"event": "heartbeat"}
 
         return None
+
+    def _parse_err_line(self, line: str) -> dict | None:
+        """Parse a stderr log line (plain text, not JSON).
+        The gateway.err.log contains tool errors and event queue activity."""
+        if not line or len(line) < 10:
+            return None
+        # [tools] entries = real tool activity
+        if "[tools]" in line:
+            return {"event": "run_start"}
+        # Slow listener = bot is processing
+        if "Slow listener detected" in line:
+            return {"event": "slow_listener"}
+        # [EventQueue] = event processing
+        if "[EventQueue]" in line:
+            return {"event": "heartbeat"}
+        return None
+
+    def _get_err_log_path(self) -> Path:
+        """Get the stderr log file path"""
+        return Path(self._err_log_dir) / self._err_log_file
 
     def run(self):  # pragma: no cover
         """Main loop — tail log file and send status updates"""
@@ -530,6 +557,16 @@ class ActivityWatcher:
             f = open(log_path, "r")
             f.seek(0, 2)
 
+        # Also open stderr log for tool activity detection
+        err_log_path = self._get_err_log_path()
+        err_f = None
+        if err_log_path.exists():
+            err_f = open(err_log_path, "r")
+            err_f.seek(0, 2)
+            log(f"Also watching stderr: {err_log_path}")
+        else:
+            log(f"Stderr log not found: {err_log_path}")
+
         current_day = datetime.now().day
 
         try:
@@ -541,6 +578,12 @@ class ActivityWatcher:
                         time.sleep(1)
                     f = open(log_path, "r")
                     current_day = datetime.now().day
+                    # Re-open stderr log too (it doesn't rotate daily but re-check)
+                    if err_f:
+                        err_f.close()
+                    if err_log_path.exists():
+                        err_f = open(err_log_path, "r")
+                        err_f.seek(0, 2)
 
                 # Check signal file first (takes priority when fresh)
                 signal_data = self._read_signal()
@@ -550,12 +593,25 @@ class ActivityWatcher:
                 else:
                     self._last_signal_state = None
 
+                had_activity = False
+
                 line = f.readline()
                 if line:
                     info = self._parse_line(line.strip())
                     if info and not signal_active:
                         self._handle_event(info)
-                else:
+                    had_activity = True
+
+                # Check stderr log for tool activity
+                if err_f:
+                    err_line = err_f.readline()
+                    if err_line:
+                        err_info = self._parse_err_line(err_line.strip())
+                        if err_info and not signal_active:
+                            self._handle_event(err_info)
+                        had_activity = True
+
+                if not had_activity:
                     if not signal_active:
                         self._check_composing_timer()
                         self._check_idle()
