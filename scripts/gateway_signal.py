@@ -35,6 +35,27 @@ CPU_ACTIVE_THRESHOLD = 0.5 # % CPU above this = active
 IDLE_AFTER = 15            # seconds of no activity before writing idle
 STALE_SIGNAL_AGE = 25      # write signal if older than this (keep it fresh while active)
 
+# State → detail mapping for signal file
+STATE_DETAILS = {
+    "web_search": ("searching", "Searching the web"),
+    "web_fetch": ("reading", "Reading a webpage"),
+    "message": ("composing", "Writing on Discord"),
+    "chat.send": ("composing", "Sending a reply"),
+    "chat.reply": ("composing", "Sending a reply"),
+    "exec": ("executing", "Running a command"),
+    "read": ("reading", "Reading a file"),
+    "write": ("coding", "Writing a file"),
+    "edit": ("coding", "Editing a file"),
+    "memory_search": ("searching", "Searching memory"),
+    "memory_get": ("reading", "Reading memory"),
+    "browser": ("searching", "Using the browser"),
+    "cron": ("thinking", "Managing cron jobs"),
+    "sessions_spawn": ("thinking", "Spawning a sub-agent"),
+    "image": ("thinking", "Analysing an image"),
+    "discord": ("composing", "Working in Discord"),
+    "Slow listener": ("thinking", "Processing a response"),
+}
+
 
 def log(msg):
     os.makedirs(STATUS_DIR, exist_ok=True)
@@ -111,6 +132,65 @@ def get_active_connections(pid):
         return 0
 
 
+def detect_activity_detail(log_dir, err_log):
+    """Read recent log entries to determine what the agent is currently doing.
+    Returns (state, detail) tuple."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_path = f"{log_dir}/clawdbot-{today}.log"
+
+    # Check both logs, most recent entries first
+    recent_lines = []
+
+    # Read last few lines of stderr (has tool info)
+    try:
+        with open(err_log, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            tail = f.read().decode("utf-8", errors="replace")
+            recent_lines.extend(tail.strip().splitlines()[-5:])
+    except OSError:
+        pass
+
+    # Read last few lines of dated log
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            tail = f.read().decode("utf-8", errors="replace")
+            recent_lines.extend(tail.strip().splitlines()[-5:])
+    except OSError:
+        pass
+
+    # Filter to entries from the last 30 seconds
+    now = time.time()
+    fresh_lines = []
+    for line in recent_lines:
+        # Try to extract timestamp
+        m = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", line)
+        if m:
+            try:
+                from datetime import timezone
+                ts_str = m.group(1)
+                dt = datetime.fromisoformat(ts_str + "+00:00")
+                age = now - dt.timestamp()
+                if age < 30:
+                    fresh_lines.append(line)
+            except Exception:
+                fresh_lines.append(line)  # Include if can't parse
+        else:
+            fresh_lines.append(line)
+
+    # Search fresh lines for activity indicators (check most specific first)
+    combined = " ".join(fresh_lines)
+    for keyword, (state, detail) in STATE_DETAILS.items():
+        if keyword in combined:
+            return state, detail
+
+    return "thinking", "Working"
+
+
 def write_signal(agent_name, state, detail=""):
     """Write the agent status signal file atomically"""
     os.makedirs(STATUS_DIR, exist_ok=True)
@@ -138,6 +218,7 @@ def main():
     last_log_mtime = get_log_mtime()
     was_active = False
     last_write_time = 0
+    last_state = ""
 
     while True:
         try:
@@ -163,12 +244,16 @@ def main():
 
             if is_active:
                 last_active_time = now
+                # Detect what the agent is actually doing
+                state, detail = detect_activity_detail(LOG_DIR, ERR_LOG)
                 # Only write signal if state changed or signal is getting stale
-                if not was_active or (now - last_write_time > STALE_SIGNAL_AGE):
+                if not was_active or (now - last_write_time > STALE_SIGNAL_AGE) or state != last_state:
                     if not was_active:
                         log(f"  ⚡ Active (CPU: {cpu:.1f}%, log_changed: {log_changed})")
-                    write_signal(agent_name, "thinking", "Working...")
+                    log(f"  → {state}: {detail}")
+                    write_signal(agent_name, state, detail)
                     last_write_time = now
+                    last_state = state
                 was_active = True
 
             elif was_active:
@@ -179,10 +264,13 @@ def main():
                         log(f"  💤 Idle after {idle_secs:.0f}s")
                     remove_signal()
                     was_active = False
+                    last_state = ""
                 elif now - last_write_time > STALE_SIGNAL_AGE:
                     # Still in grace period, keep signal fresh
-                    write_signal(agent_name, "thinking", "Working...")
+                    state, detail = detect_activity_detail(LOG_DIR, ERR_LOG)
+                    write_signal(agent_name, state, detail)
                     last_write_time = now
+                    last_state = state
 
         except Exception as e:
             log(f"Error: {e}")
