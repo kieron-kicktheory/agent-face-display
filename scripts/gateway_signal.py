@@ -34,7 +34,7 @@ ERR_LOG_PATH = Path.home() / ".clawdbot/logs/gateway.err.log"
 
 CPU_POLL_INTERVAL = 3.0     # seconds between CPU checks
 CPU_ACTIVE_THRESHOLD = 0.5  # % CPU above this = active
-IDLE_AFTER = 15             # seconds of no activity before removing signal
+IDLE_AFTER = 45             # seconds of no activity before removing signal
 STALE_SIGNAL_AGE = 25       # refresh signal if older than this while active
 LOOP_SLEEP = 0.15           # main loop sleep (fast enough to tail logs)
 
@@ -225,8 +225,17 @@ def main():
                 # Use log-detected detail if available, otherwise generic
                 if log_activity:
                     state, detail = log_activity
+                elif not was_active:
+                    # Just became active — use "Thinking" not "Working"
+                    # (more natural for the initial detection)
+                    state, detail = "thinking", "Thinking"
                 else:
-                    state, detail = "thinking", "Working"
+                    # Already active, keep previous specific state if we had one
+                    # Only fall back to generic if we never had specific detail
+                    if last_detail and last_detail not in ("Working", "Thinking"):
+                        state, detail = last_state, last_detail
+                    else:
+                        state, detail = "thinking", "Thinking"
 
                 # Check if someone else wrote a more specific signal recently
                 # (e.g. write_status.sh called directly) — don't overwrite it
